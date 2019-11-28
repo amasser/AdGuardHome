@@ -19,6 +19,8 @@
     "dhcp_leases_not_found": "Ni najdenih najemov DHCP",
     "dhcp_config_saved": "Shranjena konfiguracija DHCP strežnika",
     "form_error_required": "Zahtevano polje",
+    "form_error_ip4_format": "Neveljaven format IPv4",
+    "form_error_ip6_format": "Neveljaven format IPv6",
     "form_error_mac_format": "Neveljaven MAC format",
     "form_error_positive": "Mora biti večja od 0",
     "dhcp_form_gateway_input": "IP prehoda",

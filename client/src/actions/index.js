@@ -232,19 +232,30 @@ export const dnsStatusRequest = createAction('DNS_STATUS_REQUEST');
 export const dnsStatusFailure = createAction('DNS_STATUS_FAILURE');
 export const dnsStatusSuccess = createAction('DNS_STATUS_SUCCESS');
 
-export const getDnsStatus = () => async (dispatch) => {
-    dispatch(dnsStatusRequest());
-    try {
-        const dnsStatus = await apiClient.getGlobalStatus();
-        dispatch(dnsStatusSuccess(dnsStatus));
-        dispatch(getVersion());
-        dispatch(getTlsStatus());
-        dispatch(getProfile());
-    } catch (error) {
-        dispatch(addErrorToast({ error }));
-        dispatch(dnsStatusFailure());
-    }
+const getDnsStatusHOF = () => {
+    let dnsRequestPromises = [];
+
+    return () => (dispatch) => {
+        dispatch(dnsStatusRequest());
+        dnsRequestPromises.push(apiClient.getGlobalStatus());
+
+        Promise.race(dnsRequestPromises).then((dnsStatus) => {
+            if (dnsRequestPromises.length) {
+                dispatch(dnsStatusSuccess(dnsStatus));
+                dispatch(getVersion());
+                dispatch(getTlsStatus());
+                dispatch(getProfile());
+
+                dnsRequestPromises = [];
+            }
+        }).catch((error) => {
+            dispatch(addErrorToast({ error }));
+            dispatch(dnsStatusFailure());
+        });
+    };
 };
+
+export const getDnsStatus = getDnsStatusHOF();
 
 export const getDnsSettingsRequest = createAction('GET_DNS_SETTINGS_REQUEST');
 export const getDnsSettingsFailure = createAction('GET_DNS_SETTINGS_FAILURE');

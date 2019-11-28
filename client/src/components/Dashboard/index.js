@@ -83,7 +83,14 @@ class Dashboard extends Component {
                         {refreshFullButton}
                     </div>
                 </PageTitle>
-                {dashboardProcessing && <Loading />}
+                {dashboardProcessing &&
+                <Fragment>
+                    {dashboard.processing &&
+                    <h6 className="page-title">
+                        <Trans>dns_server_start</Trans>
+                    </h6>}
+                    <Loading />
+                </Fragment>}
                 {!dashboardProcessing && (
                     <div className="row row-cards">
                         <div className="col-lg-12">

@@ -102,6 +102,7 @@
     "no_servers_specified": "No servers specified",
     "general_settings": "General settings",
     "dns_settings": "DNS settings",
+    "dns_server_start": "DNS server is starting up",
     "encryption_settings": "Encryption settings",
     "dhcp_settings": "DHCP settings",
     "upstream_dns": "Upstream DNS servers",

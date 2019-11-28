@@ -32,10 +32,20 @@ import i18n from '../../i18n';
 
 class App extends Component {
     componentDidMount() {
-        this.props.getDnsStatus();
+        if (this.props.dashboard.isCoreRunning === false) {
+            const intervalId = setInterval(() => {
+                this.props.getDnsStatus();
+            }, 1000);
+            this.setState({ intervalId });
+        }
     }
 
     componentDidUpdate(prevProps) {
+        if (this.props.dashboard.isCoreRunning !== prevProps.dashboard.isCoreRunning
+            && this.props.dashboard.isCoreRunning === true) {
+            clearInterval(this.state.intervalId);
+        }
+
         if (this.props.dashboard.language !== prevProps.dashboard.language) {
             this.setLanguage();
         }
@@ -95,9 +105,9 @@ class App extends Component {
                                 </div>
                             </div>
                         )}
+                        <Route path="/" exact component={Dashboard} />
                         {!dashboard.processing && dashboard.isCoreRunning && (
                             <Fragment>
-                                <Route path="/" exact component={Dashboard} />
                                 <Route path="/settings" component={Settings} />
                                 <Route path="/dns" component={Dns} />
                                 <Route path="/encryption" component={Encryption} />

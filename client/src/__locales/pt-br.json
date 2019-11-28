@@ -19,6 +19,8 @@
     "dhcp_leases_not_found": "Nenhuma concessão DHCP encontrada",
     "dhcp_config_saved": "Salvar configurações do servidor DHCP",
     "form_error_required": "Campo obrigatório",
+    "form_error_ip4_format": "Formato de endereço IPv4 inválido",
+    "form_error_ip6_format": "Formato de endereço IPv6 inválido",
     "form_error_mac_format": "Formato do endereço MAC inválido",
     "form_error_positive": "Deve ser maior que 0",
     "dhcp_form_gateway_input": "IP do gateway",
