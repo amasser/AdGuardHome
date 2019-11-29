@@ -232,6 +232,7 @@ export const dnsStatusRequest = createAction('DNS_STATUS_REQUEST');
 export const dnsStatusFailure = createAction('DNS_STATUS_FAILURE');
 export const dnsStatusSuccess = createAction('DNS_STATUS_SUCCESS');
 
+// Wrapper for saving closure with array of dnsRequestPromises between getDnsStatus function call
 const getDnsStatusWrapper = () => {
     let dnsRequestPromises = [];
 
