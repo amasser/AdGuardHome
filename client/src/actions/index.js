@@ -232,14 +232,16 @@ export const dnsStatusRequest = createAction('DNS_STATUS_REQUEST');
 export const dnsStatusFailure = createAction('DNS_STATUS_FAILURE');
 export const dnsStatusSuccess = createAction('DNS_STATUS_SUCCESS');
 
-const getDnsStatusHOF = () => {
+const getDnsStatusWrapper = () => {
     let dnsRequestPromises = [];
 
-    return () => (dispatch) => {
+    return () => async (dispatch) => {
         dispatch(dnsStatusRequest());
         dnsRequestPromises.push(apiClient.getGlobalStatus());
 
-        Promise.race(dnsRequestPromises).then((dnsStatus) => {
+        try {
+            const dnsStatus = await Promise.race(dnsRequestPromises);
+
             if (dnsRequestPromises.length) {
                 dispatch(dnsStatusSuccess(dnsStatus));
                 dispatch(getVersion());
@@ -248,14 +250,14 @@ const getDnsStatusHOF = () => {
 
                 dnsRequestPromises = [];
             }
-        }).catch((error) => {
+        } catch (error) {
             dispatch(addErrorToast({ error }));
             dispatch(dnsStatusFailure());
-        });
+        }
     };
 };
 
-export const getDnsStatus = getDnsStatusHOF();
+export const getDnsStatus = getDnsStatusWrapper();
 
 export const getDnsSettingsRequest = createAction('GET_DNS_SETTINGS_REQUEST');
 export const getDnsSettingsFailure = createAction('GET_DNS_SETTINGS_FAILURE');
