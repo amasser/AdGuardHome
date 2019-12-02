@@ -237,23 +237,24 @@ const getDnsStatusWrapper = () => {
     let dnsRequestPromises = [];
 
     return () => async (dispatch) => {
-        dispatch(dnsStatusRequest());
+        let dnsStatus;
         dnsRequestPromises.push(apiClient.getGlobalStatus());
-
         try {
-            const dnsStatus = await Promise.race(dnsRequestPromises);
-
-            if (dnsRequestPromises.length) {
+            dnsStatus = await Promise.race(dnsRequestPromises);
+            if (dnsRequestPromises.length && dnsStatus !== null) {
+                dispatch(dnsStatusRequest());
                 dispatch(dnsStatusSuccess(dnsStatus));
                 dispatch(getVersion());
                 dispatch(getTlsStatus());
                 dispatch(getProfile());
 
-                dnsRequestPromises = [];
+                dnsRequestPromises = [Promise.resolve(null)];
             }
         } catch (error) {
-            dispatch(addErrorToast({ error }));
-            dispatch(dnsStatusFailure());
+            if (dnsStatus !== null) {
+                dispatch(addErrorToast({ error }));
+                dispatch(dnsStatusFailure());
+            }
         }
     };
 };
