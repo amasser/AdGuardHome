@@ -133,6 +133,9 @@ func (s *statsCtx) dbOpen() bool {
 	s.db, err = bolt.Open(s.conf.Filename, 0644, nil)
 	if err != nil {
 		log.Error("Stats: open DB: %s: %s", s.conf.Filename, err)
+		if err.Error() == "invalid argument" {
+			log.Error("Please read this text describing how to solve this problem: https://github.com/AdguardTeam/AdGuardHome/wiki/Getting-Started#limitations")
+		}
 		return false
 	}
 	log.Tracef("db.Open")
