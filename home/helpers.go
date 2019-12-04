@@ -16,7 +16,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/AdguardTeam/dnsproxy/upstream"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/joomcode/errorx"
 )
@@ -273,14 +272,8 @@ func customDialContext(ctx context.Context, network, addr string) (net.Conn, err
 		return con, err
 	}
 
-	bindhost := config.DNS.BindHost
-	if config.DNS.BindHost == "0.0.0.0" {
-		bindhost = "127.0.0.1"
-	}
-	resolverAddr := fmt.Sprintf("%s:%d", bindhost, config.DNS.Port)
-	r := upstream.NewResolver(resolverAddr, 30*time.Second)
-	addrs, e := r.LookupIPAddr(ctx, host)
-	log.Tracef("LookupIPAddr: %s: %v", host, addrs)
+	addrs, e := config.dnsServer.Resolve(host)
+	log.Debug("dnsServer.Resolve: %s: %v", host, addrs)
 	if e != nil {
 		return nil, e
 	}

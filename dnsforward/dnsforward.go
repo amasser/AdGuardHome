@@ -51,6 +51,10 @@ type Server struct {
 	stats     stats.Stats
 	access    *accessCtx
 
+	// DNS proxy instance for internal usage
+	// We don't Start() it and so no listen port is required.
+	internalProxy *proxy.Proxy
+
 	webRegistered bool
 	isRunning     bool
 
@@ -159,6 +163,36 @@ var defaultValues = ServerConfig{
 	FilteringConfig: FilteringConfig{BlockedResponseTTL: 3600},
 }
 
+// Resolve - get IP addresses by host name from an upstream server.
+// No request/response filtering is performed.
+// Query log and Stats are not updated.
+// This method may be called before Start().
+func (s *Server) Resolve(host string) ([]net.IPAddr, error) {
+	s.RLock()
+	defer s.RUnlock()
+	return s.internalProxy.LookupIPAddr(host)
+}
+
+// Exchange - send DNS request to an upstream server and receive response
+// No request/response filtering is performed.
+// Query log and Stats are not updated.
+// This method may be called before Start().
+func (s *Server) Exchange(req *dns.Msg) (*dns.Msg, error) {
+	s.RLock()
+	defer s.RUnlock()
+
+	ctx := &proxy.DNSContext{
+		Proto:     "udp",
+		Req:       req,
+		StartTime: time.Now(),
+	}
+	err := s.internalProxy.Resolve(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return ctx.Res, nil
+}
+
 // Start starts the DNS server
 func (s *Server) Start() error {
 	s.Lock()
@@ -226,6 +260,14 @@ func (s *Server) Prepare(config *ServerConfig) error {
 		RequestHandler:           s.handleDNSRequest,
 		AllServers:               s.conf.AllServers,
 	}
+
+	intlProxyConfig := proxy.Config{
+		CacheEnabled:             true,
+		CacheSizeBytes:           4096,
+		Upstreams:                s.conf.Upstreams,
+		DomainsReservedUpstreams: s.conf.DomainsReservedUpstreams,
+	}
+	s.internalProxy = &proxy.Proxy{Config: intlProxyConfig}
 
 	s.access = &accessCtx{}
 	err = s.access.Init(s.conf.AllowedClients, s.conf.DisallowedClients, s.conf.BlockedHosts)

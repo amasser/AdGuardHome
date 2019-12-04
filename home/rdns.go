@@ -2,11 +2,9 @@ package home
 
 import (
 	"encoding/binary"
-	"fmt"
 	"strings"
 	"time"
 
-	"github.com/AdguardTeam/dnsproxy/upstream"
 	"github.com/AdguardTeam/golibs/cache"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/miekg/dns"
@@ -19,8 +17,7 @@ const (
 // RDNS - module context
 type RDNS struct {
 	clients   *clientsContainer
-	ipChannel chan string       // pass data from DNS request handling thread to rDNS thread
-	upstream  upstream.Upstream // Upstream object for our own DNS server
+	ipChannel chan string // pass data from DNS request handling thread to rDNS thread
 
 	// Contains IP addresses of clients to be resolved by rDNS
 	// If IP address is resolved, it stays here while it's inside Clients.
@@ -33,22 +30,6 @@ type RDNS struct {
 func InitRDNS(clients *clientsContainer) *RDNS {
 	r := RDNS{}
 	r.clients = clients
-	var err error
-
-	bindhost := config.DNS.BindHost
-	if config.DNS.BindHost == "0.0.0.0" {
-		bindhost = "127.0.0.1"
-	}
-	resolverAddress := fmt.Sprintf("%s:%d", bindhost, config.DNS.Port)
-
-	opts := upstream.Options{
-		Timeout: rdnsTimeout,
-	}
-	r.upstream, err = upstream.AddressToUpstream(resolverAddress, opts)
-	if err != nil {
-		log.Error("upstream.AddressToUpstream: %s", err)
-		return nil
-	}
 
 	cconf := cache.Config{}
 	cconf.EnableLRU = true
@@ -109,7 +90,7 @@ func (r *RDNS) resolve(ip string) string {
 		return ""
 	}
 
-	resp, err := r.upstream.Exchange(&req)
+	resp, err := config.dnsServer.Exchange(&req)
 	if err != nil {
 		log.Debug("Error while making an rDNS lookup for %s: %s", ip, err)
 		return ""
