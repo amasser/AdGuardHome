@@ -28,12 +28,12 @@ func onConfigModified() {
 // initDNSServer creates an instance of the dnsforward.Server
 // Please note that we must do it even if we don't start it
 // so that we had access to the query log and the stats
-func initDNSServer() {
+func initDNSServer() error {
 	baseDir := config.getDataDir()
 
 	err := os.MkdirAll(baseDir, 0755)
 	if err != nil {
-		log.Fatalf("Cannot create DNS data dir at %s: %s", baseDir, err)
+		return fmt.Errorf("Cannot create DNS data dir at %s: %s", baseDir, err)
 	}
 
 	statsConf := stats.Config{
@@ -44,7 +44,7 @@ func initDNSServer() {
 	}
 	config.stats, err = stats.New(statsConf)
 	if err != nil {
-		log.Fatal("Couldn't initialize statistics module")
+		return fmt.Errorf("Couldn't initialize statistics module")
 	}
 	conf := querylog.Config{
 		Enabled:        config.DNS.QueryLogEnabled,
@@ -67,6 +67,11 @@ func initDNSServer() {
 	config.dnsFilter = dnsfilter.New(&filterConf, nil)
 
 	config.dnsServer = dnsforward.NewServer(config.dnsFilter, config.stats, config.queryLog)
+	dnsConfig := generateServerConfig()
+	err = config.dnsServer.Prepare(&dnsConfig)
+	if err != nil {
+		return fmt.Errorf("dnsServer.Prepare: %s", err)
+	}
 
 	sessFilename := filepath.Join(baseDir, "sessions.db")
 	config.auth = InitAuth(sessFilename, config.Users, config.WebSessionTTLHours*60*60)
@@ -76,6 +81,7 @@ func initDNSServer() {
 	config.dnsctx.whois = initWhois(&config.clients)
 
 	initFiltering()
+	return nil
 }
 
 func isRunning() bool {
@@ -152,7 +158,7 @@ func onDNSRequest(d *proxy.DNSContext) {
 	}
 }
 
-func generateServerConfig() (dnsforward.ServerConfig, error) {
+func generateServerConfig() dnsforward.ServerConfig {
 	newconfig := dnsforward.ServerConfig{
 		UDPListenAddr:   &net.UDPAddr{IP: net.ParseIP(config.DNS.BindHost), Port: config.DNS.Port},
 		TCPListenAddr:   &net.TCPAddr{IP: net.ParseIP(config.DNS.BindHost), Port: config.DNS.Port},
@@ -171,7 +177,7 @@ func generateServerConfig() (dnsforward.ServerConfig, error) {
 
 	newconfig.FilterHandler = applyAdditionalFiltering
 	newconfig.GetUpstreamsByClient = getUpstreamsByClient
-	return newconfig, nil
+	return newconfig
 }
 
 func getUpstreamsByClient(clientAddr string) []string {
@@ -220,12 +226,7 @@ func startDNSServer() error {
 
 	enableFilters(false)
 
-	newconfig, err := generateServerConfig()
-	if err != nil {
-		return errorx.Decorate(err, "Couldn't start forwarding DNS server")
-	}
-
-	err = config.dnsServer.Start(&newconfig)
+	err := config.dnsServer.Start()
 	if err != nil {
 		return errorx.Decorate(err, "Couldn't start forwarding DNS server")
 	}
@@ -248,11 +249,8 @@ func startDNSServer() error {
 }
 
 func reconfigureDNSServer() error {
-	newconfig, err := generateServerConfig()
-	if err != nil {
-		return errorx.Decorate(err, "Couldn't start forwarding DNS server")
-	}
-	err = config.dnsServer.Reconfigure(&newconfig)
+	newconfig := generateServerConfig()
+	err := config.dnsServer.Reconfigure(&newconfig)
 	if err != nil {
 		return errorx.Decorate(err, "Couldn't start forwarding DNS server")
 	}
@@ -261,10 +259,6 @@ func reconfigureDNSServer() error {
 }
 
 func stopDNSServer() error {
-	if !isRunning() {
-		return nil
-	}
-
 	err := config.dnsServer.Stop()
 	if err != nil {
 		return errorx.Decorate(err, "Couldn't stop forwarding DNS server")

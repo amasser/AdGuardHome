@@ -146,7 +146,10 @@ func run(args options) {
 			log.Fatal(err)
 		}
 
-		initDNSServer()
+		err = initDNSServer()
+		if err != nil {
+			log.Fatalf("%s", err)
+		}
 		go func() {
 			err = startDNSServer()
 			if err != nil {

@@ -52,6 +52,7 @@ type Server struct {
 	access    *accessCtx
 
 	webRegistered bool
+	isRunning     bool
 
 	sync.RWMutex
 	conf ServerConfig
@@ -159,23 +160,23 @@ var defaultValues = ServerConfig{
 }
 
 // Start starts the DNS server
-func (s *Server) Start(config *ServerConfig) error {
+func (s *Server) Start() error {
 	s.Lock()
 	defer s.Unlock()
-	return s.startInternal(config)
+	return s.startInternal()
 }
 
 // startInternal starts without locking
-func (s *Server) startInternal(config *ServerConfig) error {
-	err := s.prepare(config)
-	if err != nil {
-		return err
+func (s *Server) startInternal() error {
+	err := s.dnsProxy.Start()
+	if err == nil {
+		s.isRunning = true
 	}
-	return s.dnsProxy.Start()
+	return err
 }
 
 // Prepare the object
-func (s *Server) prepare(config *ServerConfig) error {
+func (s *Server) Prepare(config *ServerConfig) error {
 	if s.dnsProxy != nil {
 		return errors.New("DNS server is already started")
 	}
@@ -275,18 +276,15 @@ func (s *Server) stopInternal() error {
 		}
 	}
 
+	s.isRunning = false
 	return nil
 }
 
 // IsRunning returns true if the DNS server is running
 func (s *Server) IsRunning() bool {
 	s.RLock()
-	isRunning := true
-	if s.dnsProxy == nil {
-		isRunning = false
-	}
-	s.RUnlock()
-	return isRunning
+	defer s.RUnlock()
+	return s.isRunning
 }
 
 // Restart - restart server
@@ -298,7 +296,7 @@ func (s *Server) Restart() error {
 	if err != nil {
 		return errorx.Decorate(err, "could not reconfigure the server")
 	}
-	err = s.startInternal(nil)
+	err = s.startInternal()
 	if err != nil {
 		return errorx.Decorate(err, "could not reconfigure the server")
 	}
@@ -322,7 +320,12 @@ func (s *Server) Reconfigure(config *ServerConfig) error {
 		time.Sleep(1 * time.Second)
 	}
 
-	err = s.startInternal(config)
+	err = s.Prepare(config)
+	if err != nil {
+		return errorx.Decorate(err, "could not reconfigure the server")
+	}
+
+	err = s.startInternal()
 	if err != nil {
 		return errorx.Decorate(err, "could not reconfigure the server")
 	}
