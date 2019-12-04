@@ -13,6 +13,7 @@ import rewrites from './rewrites';
 import services from './services';
 import stats from './stats';
 import queryLogs from './queryLogs';
+import blockingModes from './blockingModes';
 import filtering from './filtering';
 
 const settings = handleActions(
@@ -350,6 +351,7 @@ export default combineReducers({
     settings,
     dashboard,
     queryLogs,
+    blockingModes,
     filtering,
     toasts,
     dhcp,

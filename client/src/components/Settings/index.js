@@ -7,6 +7,7 @@ import StatsConfig from './StatsConfig';
 import LogsConfig from './LogsConfig';
 import FiltersConfig from './FiltersConfig';
 import Checkbox from '../ui/Checkbox';
+import BlockingModeConfig from './BlockingModeConfig';
 import Loading from '../ui/Loading';
 import PageTitle from '../ui/PageTitle';
 import Card from '../ui/Card';
@@ -68,10 +69,12 @@ class Settings extends Component {
             resetStats,
             stats,
             queryLogs,
+            blockingModes,
             setLogsConfig,
             clearLogs,
             filtering,
             setFiltersConfig,
+            setBlockingModesConfig,
             t,
         } = this.props;
 
@@ -100,6 +103,14 @@ class Settings extends Component {
                                         {this.renderSettings(settings.settingsList)}
                                     </div>
                                 </Card>
+                                <BlockingModeConfig
+                                    enabled={blockingModes.enabled}
+                                    mode={blockingModes.mode}
+                                    processing={blockingModes.processingSetConfig}
+                                    setBlockingModesConfig={setBlockingModesConfig}
+                                />
+                            </div>
+                            <div className="col-md-12">
                             </div>
                             <div className="col-md-12">
                                 <LogsConfig
