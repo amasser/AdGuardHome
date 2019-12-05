@@ -2,7 +2,6 @@ package dnsforward
 
 import (
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -211,10 +210,6 @@ func (s *Server) startInternal() error {
 
 // Prepare the object
 func (s *Server) Prepare(config *ServerConfig) error {
-	if s.dnsProxy != nil {
-		return errors.New("DNS server is already started")
-	}
-
 	if config != nil {
 		s.conf = *config
 	}
