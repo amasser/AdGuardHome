@@ -96,11 +96,11 @@ func (s *Server) handleSetConfig(w http.ResponseWriter, r *http.Request) {
 		if req.BlockingMode == "custom_ip" {
 			if js.Exists("blocking_ipv4") {
 				s.conf.BlockingIPv4 = req.BlockingIPv4
-				s.conf.blockingIPv4 = net.ParseIP(req.BlockingIPv4)
+				s.conf.BlockingIPAddrv4 = net.ParseIP(req.BlockingIPv4)
 			}
 			if js.Exists("blocking_ipv6") {
 				s.conf.BlockingIPv6 = req.BlockingIPv6
-				s.conf.blockingIPv6 = net.ParseIP(req.BlockingIPv6)
+				s.conf.BlockingIPAddrv6 = net.ParseIP(req.BlockingIPv6)
 			}
 		}
 	}
