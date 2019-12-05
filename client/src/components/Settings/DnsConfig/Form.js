@@ -5,7 +5,16 @@ import { Field, reduxForm, formValueSelector } from 'redux-form';
 import { Trans, withNamespaces } from 'react-i18next';
 import flow from 'lodash/flow';
 
-import { renderField, renderRadioField, required, ipv4, ipv6, isPositive, toNumber } from '../../../helpers/form';
+import {
+    renderField,
+    renderRadioField,
+    renderSelectField,
+    required,
+    ipv4,
+    ipv6,
+    isPositive,
+    toNumber,
+} from '../../../helpers/form';
 import { BLOCKING_MODES } from '../../../helpers/constants';
 
 const getFields = (processing, t) => Object.values(BLOCKING_MODES).map(mode => (
@@ -29,7 +38,7 @@ let Form = ({
                 <div className="form__group form__group--settings">
                     <label htmlFor="ratelimit">
                         <Trans>rate_limit</Trans>
-                        </label>
+                    </label>
                     <Field
                         name="ratelimit"
                         type="number"
@@ -38,6 +47,17 @@ let Form = ({
                         placeholder={t('form_enter_rate_limit')}
                         normalize={toNumber}
                         validate={[required, isPositive]}
+                    />
+                </div>
+            </div>
+            <div className="col-12">
+                <div className="form__group form__group--settings">
+                    <Field
+                        name="edns_cs_enabled"
+                        type="checkbox"
+                        component={renderSelectField}
+                        placeholder={t('edns_enable')}
+                        disabled={processing}
                     />
                 </div>
             </div>

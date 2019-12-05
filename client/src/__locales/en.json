@@ -196,6 +196,7 @@
     "blocking_ipv6": "Blocking IPv6",
     "form_enter_rate_limit": "Enter rate limit",
     "rate_limit": "Rate limit",
+    "edns_enable": "Enable EDNS Client Subnet",
     "source_label": "Source",
     "found_in_known_domain_db": "Found in the known domains database.",
     "category_label": "Category",

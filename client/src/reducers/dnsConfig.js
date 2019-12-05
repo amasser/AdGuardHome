@@ -30,6 +30,7 @@ const dnsConfig = handleActions(
         ratelimit: 20,
         blocking_ipv4: '',
         blocking_ipv6: '',
+        edns_cs_enabled: false,
     },
 );
 
