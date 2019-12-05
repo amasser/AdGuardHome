@@ -10,10 +10,6 @@ import (
 	"github.com/miekg/dns"
 )
 
-const (
-	rdnsTimeout = 3 * time.Second // max time to wait for rDNS response
-)
-
 // RDNS - module context
 type RDNS struct {
 	clients   *clientsContainer
