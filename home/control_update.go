@@ -17,8 +17,126 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/AdguardTeam/AdGuardHome/util"
 	"github.com/AdguardTeam/golibs/log"
 )
+
+type updateInfo struct {
+	pkgURL           string // URL for the new package
+	pkgName          string // Full path to package file
+	newVer           string // New version string
+	updateDir        string // Full path to the directory containing unpacked files from the new package
+	backupDir        string // Full path to backup directory
+	configName       string // Full path to the current configuration file
+	updateConfigName string // Full path to the configuration file to check by the new binary
+	curBinName       string // Full path to the current executable file
+	bkpBinName       string // Full path to the current executable file in backup directory
+	newBinName       string // Full path to the new executable file
+}
+
+type getVersionJSONRequest struct {
+	RecheckNow bool `json:"recheck_now"`
+}
+
+// Get the latest available version from the Internet
+func handleGetVersionJSON(w http.ResponseWriter, r *http.Request) {
+	if Context.disableUpdate {
+		resp := make(map[string]interface{})
+		resp["disabled"] = true
+		d, _ := json.Marshal(resp)
+		_, _ = w.Write(d)
+		return
+	}
+
+	req := getVersionJSONRequest{}
+	var err error
+	if r.ContentLength != 0 {
+		err = json.NewDecoder(r.Body).Decode(&req)
+		if err != nil {
+			httpError(w, http.StatusBadRequest, "JSON parse: %s", err)
+			return
+		}
+	}
+
+	now := time.Now()
+	if !req.RecheckNow {
+		Context.controlLock.Lock()
+		cached := now.Sub(config.versionCheckLastTime) <= versionCheckPeriod && len(config.versionCheckJSON) != 0
+		data := config.versionCheckJSON
+		Context.controlLock.Unlock()
+
+		if cached {
+			log.Tracef("Returning cached data")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(getVersionResp(data))
+			return
+		}
+	}
+
+	var resp *http.Response
+	for i := 0; i != 3; i++ {
+		log.Tracef("Downloading data from %s", versionCheckURL)
+		resp, err = Context.client.Get(versionCheckURL)
+		if resp != nil && resp.Body != nil {
+			defer resp.Body.Close()
+		}
+		if err != nil && strings.HasSuffix(err.Error(), "i/o timeout") {
+			// This case may happen while we're restarting DNS server
+			// https://github.com/AdguardTeam/AdGuardHome/issues/934
+			continue
+		}
+		break
+	}
+	if err != nil {
+		httpError(w, http.StatusBadGateway, "Couldn't get version check json from %s: %T %s\n", versionCheckURL, err, err)
+		return
+	}
+
+	// read the body entirely
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		httpError(w, http.StatusBadGateway, "Couldn't read response body from %s: %s", versionCheckURL, err)
+		return
+	}
+
+	Context.controlLock.Lock()
+	config.versionCheckLastTime = now
+	config.versionCheckJSON = body
+	Context.controlLock.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	_, err = w.Write(getVersionResp(body))
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, "Couldn't write body: %s", err)
+	}
+}
+
+// Perform an update procedure to the latest available version
+func handleUpdate(w http.ResponseWriter, r *http.Request) {
+	if len(config.versionCheckJSON) == 0 {
+		httpError(w, http.StatusBadRequest, "/update request isn't allowed now")
+		return
+	}
+
+	u, err := getUpdateInfo(config.versionCheckJSON)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, "%s", err)
+		return
+	}
+
+	err = doUpdate(u)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, "%s", err)
+		return
+	}
+
+	returnOK(w)
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+
+	go finishUpdate(u)
+}
 
 // Convert version.json data to our JSON response
 func getVersionResp(data []byte) []byte {
@@ -42,84 +160,29 @@ func getVersionResp(data []byte) []byte {
 		return []byte{}
 	}
 
-	_, ok := versionJSON[fmt.Sprintf("download_%s_%s", runtime.GOOS, runtime.GOARCH)]
+	_, ok := getDownloadURL(versionJSON)
 	if ok && ret["new_version"] != versionString && versionString >= selfUpdateMinVersion {
-		ret["can_autoupdate"] = true
+		canUpdate := true
+
+		tlsConf := tlsConfigSettings{}
+		Context.tls.WriteDiskConfig(&tlsConf)
+
+		if runtime.GOOS != "windows" &&
+			((tlsConf.Enabled && (tlsConf.PortHTTPS < 1024 || tlsConf.PortDNSOverTLS < 1024)) ||
+				config.BindPort < 1024 ||
+				config.DNS.Port < 1024) {
+			// On UNIX, if we're running under a regular user,
+			//  but with CAP_NET_BIND_SERVICE set on a binary file,
+			//  and we're listening on ports <1024,
+			//  we won't be able to restart after we replace the binary file,
+			//  because we'll lose CAP_NET_BIND_SERVICE capability.
+			canUpdate, _ = util.HaveAdminRights()
+		}
+		ret["can_autoupdate"] = canUpdate
 	}
 
 	d, _ := json.Marshal(ret)
 	return d
-}
-
-type getVersionJSONRequest struct {
-	RecheckNow bool `json:"recheck_now"`
-}
-
-// Get the latest available version from the Internet
-func handleGetVersionJSON(w http.ResponseWriter, r *http.Request) {
-
-	if config.disableUpdate {
-		return
-	}
-
-	req := getVersionJSONRequest{}
-	err := json.NewDecoder(r.Body).Decode(&req)
-	if err != nil {
-		httpError(w, http.StatusBadRequest, "JSON parse: %s", err)
-		return
-	}
-
-	now := time.Now()
-	if !req.RecheckNow {
-		config.controlLock.Lock()
-		cached := now.Sub(config.versionCheckLastTime) <= versionCheckPeriod && len(config.versionCheckJSON) != 0
-		data := config.versionCheckJSON
-		config.controlLock.Unlock()
-
-		if cached {
-			log.Tracef("Returning cached data")
-			w.Header().Set("Content-Type", "application/json")
-			w.Write(getVersionResp(data))
-			return
-		}
-	}
-
-	var resp *http.Response
-	for i := 0; i != 3; i++ {
-		log.Tracef("Downloading data from %s", versionCheckURL)
-		resp, err = config.client.Get(versionCheckURL)
-		if err != nil && strings.HasSuffix(err.Error(), "i/o timeout") {
-			// This case may happen while we're restarting DNS server
-			// https://github.com/AdguardTeam/AdGuardHome/issues/934
-			continue
-		}
-		break
-	}
-	if err != nil {
-		httpError(w, http.StatusBadGateway, "Couldn't get version check json from %s: %T %s\n", versionCheckURL, err, err)
-		return
-	}
-	if resp != nil && resp.Body != nil {
-		defer resp.Body.Close()
-	}
-
-	// read the body entirely
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		httpError(w, http.StatusBadGateway, "Couldn't read response body from %s: %s", versionCheckURL, err)
-		return
-	}
-
-	config.controlLock.Lock()
-	config.versionCheckLastTime = now
-	config.versionCheckJSON = body
-	config.controlLock.Unlock()
-
-	w.Header().Set("Content-Type", "application/json")
-	_, err = w.Write(getVersionResp(body))
-	if err != nil {
-		httpError(w, http.StatusInternalServerError, "Couldn't write body: %s", err)
-	}
 }
 
 // Copy file on disk
@@ -135,24 +198,11 @@ func copyFile(src, dst string) error {
 	return nil
 }
 
-type updateInfo struct {
-	pkgURL           string // URL for the new package
-	pkgName          string // Full path to package file
-	newVer           string // New version string
-	updateDir        string // Full path to the directory containing unpacked files from the new package
-	backupDir        string // Full path to backup directory
-	configName       string // Full path to the current configuration file
-	updateConfigName string // Full path to the configuration file to check by the new binary
-	curBinName       string // Full path to the current executable file
-	bkpBinName       string // Full path to the current executable file in backup directory
-	newBinName       string // Full path to the new executable file
-}
-
 // Fill in updateInfo object
 func getUpdateInfo(jsonData []byte) (*updateInfo, error) {
 	var u updateInfo
 
-	workDir := config.ourWorkingDir
+	workDir := Context.workDir
 
 	versionJSON := make(map[string]interface{})
 	err := json.Unmarshal(jsonData, &versionJSON)
@@ -160,14 +210,19 @@ func getUpdateInfo(jsonData []byte) (*updateInfo, error) {
 		return nil, fmt.Errorf("JSON parse: %s", err)
 	}
 
-	u.pkgURL = versionJSON[fmt.Sprintf("download_%s_%s", runtime.GOOS, runtime.GOARCH)].(string)
+	pkgURL, ok := getDownloadURL(versionJSON)
+	if !ok {
+		return nil, fmt.Errorf("failed to get download URL")
+	}
+
+	u.pkgURL = pkgURL
 	u.newVer = versionJSON["version"].(string)
 	if len(u.pkgURL) == 0 || len(u.newVer) == 0 {
-		return nil, fmt.Errorf("Invalid JSON")
+		return nil, fmt.Errorf("invalid JSON")
 	}
 
 	if u.newVer == versionString {
-		return nil, fmt.Errorf("No need to update")
+		return nil, fmt.Errorf("no need to update")
 	}
 
 	u.updateDir = filepath.Join(workDir, fmt.Sprintf("agh-update-%s", u.newVer))
@@ -175,7 +230,7 @@ func getUpdateInfo(jsonData []byte) (*updateInfo, error) {
 
 	_, pkgFileName := filepath.Split(u.pkgURL)
 	if len(pkgFileName) == 0 {
-		return nil, fmt.Errorf("Invalid JSON")
+		return nil, fmt.Errorf("invalid JSON")
 	}
 	u.pkgName = filepath.Join(u.updateDir, pkgFileName)
 
@@ -190,6 +245,9 @@ func getUpdateInfo(jsonData []byte) (*updateInfo, error) {
 		binName = "AdGuardHome.exe"
 	}
 	u.curBinName = filepath.Join(workDir, binName)
+	if !util.FileExists(u.curBinName) {
+		return nil, fmt.Errorf("executable file %s doesn't exist", u.curBinName)
+	}
 	u.bkpBinName = filepath.Join(u.backupDir, binName)
 	u.newBinName = filepath.Join(u.updateDir, "AdGuardHome", binName)
 	if strings.HasSuffix(pkgFileName, ".zip") {
@@ -197,6 +255,33 @@ func getUpdateInfo(jsonData []byte) (*updateInfo, error) {
 	}
 
 	return &u, nil
+}
+
+// getDownloadURL - gets download URL for the current GOOS/GOARCH
+// returns
+func getDownloadURL(json map[string]interface{}) (string, bool) {
+	var key string
+
+	if runtime.GOARCH == "arm" && ARMVersion != "" {
+		// the key is:
+		// download_linux_armv5 for ARMv5
+		// download_linux_armv6 for ARMv6
+		// download_linux_armv7 for ARMv7
+		key = fmt.Sprintf("download_%s_%sv%s", runtime.GOOS, runtime.GOARCH, ARMVersion)
+	}
+
+	u, ok := json[key]
+	if !ok {
+		// the key is download_linux_arm or download_linux_arm64 for regular ARM versions
+		key = fmt.Sprintf("download_%s_%s", runtime.GOOS, runtime.GOARCH)
+		u, ok = json[key]
+	}
+
+	if !ok {
+		return "", false
+	}
+
+	return u.(string), true
 }
 
 // Unpack all files from .zip file to the specified directory
@@ -356,7 +441,7 @@ func copySupportingFiles(files []string, srcdir, dstdir string, useSrcNameOnly, 
 
 // Download package file and save it to disk
 func getPackageFile(u *updateInfo) error {
-	resp, err := config.client.Get(u.pkgURL)
+	resp, err := Context.client.Get(u.pkgURL)
 	if err != nil {
 		return fmt.Errorf("HTTP request failed: %s", err)
 	}
@@ -405,7 +490,7 @@ func doUpdate(u *updateInfo) error {
 			return fmt.Errorf("targzFileUnpack() failed: %s", err)
 		}
 	} else {
-		return fmt.Errorf("Unknown package extension")
+		return fmt.Errorf("unknown package extension")
 	}
 
 	log.Tracef("Checking configuration")
@@ -427,17 +512,17 @@ func doUpdate(u *updateInfo) error {
 	}
 
 	// ./README.md -> backup/README.md
-	err = copySupportingFiles(files, config.ourWorkingDir, u.backupDir, true, true)
+	err = copySupportingFiles(files, Context.workDir, u.backupDir, true, true)
 	if err != nil {
 		return fmt.Errorf("copySupportingFiles(%s, %s) failed: %s",
-			config.ourWorkingDir, u.backupDir, err)
+			Context.workDir, u.backupDir, err)
 	}
 
 	// update/[AdGuardHome/]README.md -> ./README.md
-	err = copySupportingFiles(files, u.updateDir, config.ourWorkingDir, false, true)
+	err = copySupportingFiles(files, u.updateDir, Context.workDir, false, true)
 	if err != nil {
 		return fmt.Errorf("copySupportingFiles(%s, %s) failed: %s",
-			u.updateDir, config.ourWorkingDir, err)
+			u.updateDir, Context.workDir, err)
 	}
 
 	log.Tracef("Renaming: %s -> %s", u.curBinName, u.bkpBinName)
@@ -465,12 +550,10 @@ func doUpdate(u *updateInfo) error {
 func finishUpdate(u *updateInfo) {
 	log.Info("Stopping all tasks")
 	cleanup()
-	stopHTTPServer()
 	cleanupAlways()
 
 	if runtime.GOOS == "windows" {
-
-		if config.runningAsService {
+		if Context.runningAsService {
 			// Note:
 			// we can't restart the service via "kardianos/service" package - it kills the process first
 			// we can't start a new instance - Windows doesn't allow it
@@ -492,9 +575,7 @@ func finishUpdate(u *updateInfo) {
 			log.Fatalf("exec.Command() failed: %s", err)
 		}
 		os.Exit(0)
-
 	} else {
-
 		log.Info("Restarting: %v", os.Args)
 		err := syscall.Exec(u.curBinName, os.Args, os.Environ())
 		if err != nil {
@@ -502,30 +583,4 @@ func finishUpdate(u *updateInfo) {
 		}
 		// Unreachable code
 	}
-}
-
-// Perform an update procedure to the latest available version
-func handleUpdate(w http.ResponseWriter, r *http.Request) {
-
-	if len(config.versionCheckJSON) == 0 {
-		httpError(w, http.StatusBadRequest, "/update request isn't allowed now")
-		return
-	}
-
-	u, err := getUpdateInfo(config.versionCheckJSON)
-	if err != nil {
-		httpError(w, http.StatusInternalServerError, "%s", err)
-		return
-	}
-
-	err = doUpdate(u)
-	if err != nil {
-		httpError(w, http.StatusInternalServerError, "%s", err)
-		return
-	}
-
-	returnOK(w)
-
-	time.Sleep(time.Second) // wait (hopefully) until response is sent (not sure whether it's really necessary)
-	go finishUpdate(u)
 }

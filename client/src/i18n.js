@@ -1,9 +1,8 @@
 import i18n from 'i18next';
-import { reactI18nextModule } from 'react-i18next';
-import { initReactI18n } from 'react-i18next/hooks';
+import { initReactI18next } from 'react-i18next';
 import langDetect from 'i18next-browser-languagedetector';
 
-import { DEFAULT_LANGUAGE } from './helpers/constants';
+import { LANGUAGES, BASE_LOCALE } from './helpers/twosky';
 
 import vi from './__locales/vi.json';
 import en from './__locales/en.json';
@@ -29,6 +28,12 @@ import ptPT from './__locales/pt-pt.json';
 import sk from './__locales/sk.json';
 import sl from './__locales/sl.json';
 import tr from './__locales/tr.json';
+import srCS from './__locales/sr-cs.json';
+import hr from './__locales/hr.json';
+import fa from './__locales/fa.json';
+import th from './__locales/th.json';
+import ro from './__locales/ro.json';
+import { setHtmlLangAttr } from './helpers/helpers';
 
 const resources = {
     en: {
@@ -103,18 +108,32 @@ const resources = {
     tr: {
         translation: tr,
     },
+    'sr-cs': {
+        translation: srCS,
+    },
+    hr: {
+        translation: hr,
+    },
+    fa: {
+        translation: fa,
+    },
+    th: {
+        translation: th,
+    },
+    ro: {
+        translation: ro,
+    },
 };
 
-const availableLanguages = Object.keys(resources);
+const availableLanguages = Object.keys(LANGUAGES);
 
 i18n
     .use(langDetect)
-    .use(initReactI18n)
-    .use(reactI18nextModule)
+    .use(initReactI18next)
     .init({
         resources,
         lowerCaseLng: true,
-        fallbackLng: DEFAULT_LANGUAGE,
+        fallbackLng: BASE_LOCALE,
         keySeparator: false,
         nsSeparator: false,
         returnEmptyString: false,
@@ -124,10 +143,13 @@ i18n
         react: {
             wait: true,
         },
-    }, () => {
+        whitelist: availableLanguages,
+    },
+    () => {
         if (!availableLanguages.includes(i18n.language)) {
-            i18n.changeLanguage(DEFAULT_LANGUAGE);
+            i18n.changeLanguage(BASE_LOCALE);
         }
+        setHtmlLangAttr(i18n.language);
     });
 
 export default i18n;

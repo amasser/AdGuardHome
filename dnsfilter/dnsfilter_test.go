@@ -3,6 +3,7 @@ package dnsfilter
 import (
 	"fmt"
 	"net"
+	"os"
 	"path"
 	"runtime"
 	"testing"
@@ -42,7 +43,7 @@ func _Func() string {
 	return path.Base(f.Name())
 }
 
-func NewForTest(c *Config, filters map[int]string) *Dnsfilter {
+func NewForTest(c *Config, filters []Filter) *Dnsfilter {
 	setts = RequestFilteringSettings{}
 	setts.FilteringEnabled = true
 	if c != nil {
@@ -98,10 +99,17 @@ func (d *Dnsfilter) checkMatchEmpty(t *testing.T, hostname string) {
 func TestEtcHostsMatching(t *testing.T) {
 	addr := "216.239.38.120"
 	addr6 := "::1"
-	text := fmt.Sprintf("   %s  google.com www.google.com   # enforce google's safesearch   \n%s  google.com\n0.0.0.0 block.com\n",
+	text := fmt.Sprintf(`  %s  google.com www.google.com   # enforce google's safesearch
+%s  ipv6.com
+0.0.0.0 block.com
+0.0.0.1 host2
+0.0.0.2 host2
+::1 host2
+`,
 		addr, addr6)
-	filters := make(map[int]string)
-	filters[0] = text
+	filters := []Filter{Filter{
+		ID: 0, Data: []byte(text),
+	}}
 	d := NewForTest(nil, filters)
 	defer d.Close()
 
@@ -110,15 +118,39 @@ func TestEtcHostsMatching(t *testing.T) {
 	d.checkMatchEmpty(t, "subdomain.google.com")
 	d.checkMatchEmpty(t, "example.org")
 
-	// IPv6 address
-	d.checkMatchIP(t, "google.com", addr6, dns.TypeAAAA)
-
-	// block both IPv4 and IPv6
+	// IPv4
 	d.checkMatchIP(t, "block.com", "0.0.0.0", dns.TypeA)
-	d.checkMatchIP(t, "block.com", "::", dns.TypeAAAA)
+
+	// ...but empty IPv6
+	ret, err := d.CheckHost("block.com", dns.TypeAAAA, &setts)
+	assert.True(t, err == nil && ret.IsFiltered && ret.IP != nil && len(ret.IP) == 0)
+	assert.True(t, ret.Rule == "0.0.0.0 block.com")
+
+	// IPv6
+	d.checkMatchIP(t, "ipv6.com", addr6, dns.TypeAAAA)
+
+	// ...but empty IPv4
+	ret, err = d.CheckHost("ipv6.com", dns.TypeA, &setts)
+	assert.True(t, err == nil && ret.IsFiltered && ret.IP != nil && len(ret.IP) == 0)
+
+	// 2 IPv4 (return only the first one)
+	ret, err = d.CheckHost("host2", dns.TypeA, &setts)
+	assert.True(t, err == nil && ret.IsFiltered)
+	assert.True(t, ret.IP != nil && ret.IP.Equal(net.ParseIP("0.0.0.1")))
+
+	// ...and 1 IPv6 address
+	ret, err = d.CheckHost("host2", dns.TypeAAAA, &setts)
+	assert.True(t, err == nil && ret.IsFiltered)
+	assert.True(t, ret.IP != nil && ret.IP.Equal(net.ParseIP("::1")))
 }
 
 // SAFE BROWSING
+
+func TestSafeBrowsingHash(t *testing.T) {
+	q, hashes := hostnameToHashParam("1.2.3.4.5.6")
+	assert.Equal(t, "0132d0fa.b5413b4e.5fa067c1.e7f6c011.", q)
+	assert.Equal(t, 4, len(hashes))
+}
 
 func TestSafeBrowsing(t *testing.T) {
 	d := NewForTest(&Config{SafeBrowsingEnabled: true}, nil)
@@ -310,7 +342,6 @@ func TestSafeSearchCacheGoogle(t *testing.T) {
 func TestParentalControl(t *testing.T) {
 	d := NewForTest(&Config{ParentalEnabled: true}, nil)
 	defer d.Close()
-	d.ParentalSensitivity = 3
 	d.checkMatch(t, "pornhub.com")
 	d.checkMatch(t, "www.pornhub.com")
 	d.checkMatchEmpty(t, "www.yandex.ru")
@@ -381,8 +412,9 @@ var tests = []struct {
 func TestMatching(t *testing.T) {
 	for _, test := range tests {
 		t.Run(fmt.Sprintf("%s-%s", test.testname, test.hostname), func(t *testing.T) {
-			filters := make(map[int]string)
-			filters[0] = test.rules
+			filters := []Filter{Filter{
+				ID: 0, Data: []byte(test.rules),
+			}}
 			d := NewForTest(nil, filters)
 			defer d.Close()
 
@@ -398,6 +430,38 @@ func TestMatching(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWhitelist(t *testing.T) {
+	rules := `||host1^
+||host2^
+`
+	filters := []Filter{Filter{
+		ID: 0, Data: []byte(rules),
+	}}
+
+	whiteRules := `||host1^
+||host3^
+`
+	whiteFilters := []Filter{Filter{
+		ID: 0, Data: []byte(whiteRules),
+	}}
+	d := NewForTest(nil, filters)
+	d.SetFilters(filters, whiteFilters, false)
+	defer d.Close()
+
+	// matched by white filter
+	ret, err := d.CheckHost("host1", dns.TypeA, &setts)
+	assert.True(t, err == nil)
+	assert.True(t, !ret.IsFiltered && ret.Reason == NotFilteredWhiteList)
+	assert.True(t, ret.Rule == "||host1^")
+
+	// not matched by white filter, but matched by block filter
+	ret, err = d.CheckHost("host2", dns.TypeA, &setts)
+	assert.True(t, err == nil)
+	assert.True(t, ret.IsFiltered && ret.Reason == FilteredBlackList)
+	assert.True(t, ret.Rule == "||host2^")
+
 }
 
 // CLIENT SETTINGS
@@ -418,11 +482,11 @@ func applyClientSettings(setts *RequestFilteringSettings) {
 //  then apply per-client settings and check behaviour once again
 func TestClientSettings(t *testing.T) {
 	var r Result
-	filters := make(map[int]string)
-	filters[0] = "||example.org^\n"
+	filters := []Filter{Filter{
+		ID: 0, Data: []byte("||example.org^\n"),
+	}}
 	d := NewForTest(&Config{ParentalEnabled: true, SafeBrowsingEnabled: false}, filters)
 	defer d.Close()
-	d.ParentalSensitivity = 3
 
 	// no client settings:
 
@@ -472,6 +536,13 @@ func TestClientSettings(t *testing.T) {
 	// blocked by additional rules
 	r, _ = d.CheckHost("facebook.com", dns.TypeA, &setts)
 	assert.True(t, r.IsFiltered && r.Reason == FilteredBlockedService)
+}
+
+func prepareTestDir() string {
+	const dir = "./agh-test"
+	_ = os.RemoveAll(dir)
+	_ = os.MkdirAll(dir, 0755)
+	return dir
 }
 
 // BENCHMARKS

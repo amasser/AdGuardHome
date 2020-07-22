@@ -1,12 +1,13 @@
 import React from 'react';
 import PropTypes from 'prop-types';
 import { Field, reduxForm } from 'redux-form';
-import { withNamespaces, Trans } from 'react-i18next';
+import { withTranslation, Trans } from 'react-i18next';
 import flow from 'lodash/flow';
 
 import i18n from '../../i18n';
 import Controls from './Controls';
-import renderField from './renderField';
+import { renderInputField } from '../../helpers/form';
+import { FORM_NAME } from '../../helpers/constants';
 
 const required = (value) => {
     if (value || value === 0) {
@@ -48,7 +49,7 @@ const Auth = (props) => {
                     </label>
                     <Field
                         name="username"
-                        component={renderField}
+                        component={renderInputField}
                         type="text"
                         className="form-control"
                         placeholder={ t('install_auth_username_enter') }
@@ -62,7 +63,7 @@ const Auth = (props) => {
                     </label>
                     <Field
                         name="password"
-                        component={renderField}
+                        component={renderInputField}
                         type="password"
                         className="form-control"
                         placeholder={ t('install_auth_password_enter') }
@@ -76,7 +77,7 @@ const Auth = (props) => {
                     </label>
                     <Field
                         name="confirm_password"
-                        component={renderField}
+                        component={renderInputField}
                         type="password"
                         className="form-control"
                         placeholder={ t('install_auth_confirm') }
@@ -98,9 +99,9 @@ Auth.propTypes = {
 };
 
 export default flow([
-    withNamespaces(),
+    withTranslation(),
     reduxForm({
-        form: 'install',
+        form: FORM_NAME.INSTALL,
         destroyOnUnmount: false,
         forceUnregisterOnUnmount: true,
         validate,

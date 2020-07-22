@@ -3,40 +3,51 @@ package home
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"net"
-	"os"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/AdguardTeam/dnsproxy/proxy"
+
 	"github.com/AdguardTeam/AdGuardHome/dhcpd"
+	"github.com/AdguardTeam/AdGuardHome/dnsfilter"
 	"github.com/AdguardTeam/AdGuardHome/dnsforward"
+	"github.com/AdguardTeam/AdGuardHome/util"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/AdguardTeam/golibs/utils"
 )
 
 const (
-	clientsUpdatePeriod = 1 * time.Hour
+	clientsUpdatePeriod = 10 * time.Minute
 )
+
+var webHandlersRegistered = false
 
 // Client information
 type Client struct {
 	IDs                 []string
+	Tags                []string
 	Name                string
 	UseOwnSettings      bool // false: use global settings
 	FilteringEnabled    bool
 	SafeSearchEnabled   bool
 	SafeBrowsingEnabled bool
 	ParentalEnabled     bool
-	WhoisInfo           [][]string // [[key,value], ...]
 
 	UseOwnBlockedServices bool // false: use global settings
 	BlockedServices       []string
 
 	Upstreams []string // list of upstream servers to be used for the client's requests
+
+	// Custom upstream config for this client
+	// nil: not yet initialized
+	// not nil, but empty: initialized, no good upstreams
+	// not nil, not empty: Upstreams ready to be used
+	upstreamConfig *proxy.UpstreamConfig
 }
 
 type clientSource uint
@@ -64,43 +75,78 @@ type clientsContainer struct {
 	ipHost  map[string]*ClientHost // IP -> Hostname
 	lock    sync.Mutex
 
+	allTags map[string]bool
+
+	// dhcpServer is used for looking up clients IP addresses by MAC addresses
 	dhcpServer *dhcpd.Server
+
+	autoHosts *util.AutoHosts // get entries from system hosts-files
 
 	testing bool // if TRUE, this object is used for internal tests
 }
 
 // Init initializes clients container
 // Note: this function must be called only once
-func (clients *clientsContainer) Init(objects []clientObject, dhcpServer *dhcpd.Server) {
+func (clients *clientsContainer) Init(objects []clientObject, dhcpServer *dhcpd.Server, autoHosts *util.AutoHosts) {
 	if clients.list != nil {
 		log.Fatal("clients.list != nil")
 	}
 	clients.list = make(map[string]*Client)
 	clients.idIndex = make(map[string]*Client)
 	clients.ipHost = make(map[string]*ClientHost)
+
+	clients.allTags = make(map[string]bool)
+	for _, t := range clientTags {
+		clients.allTags[t] = false
+	}
+
 	clients.dhcpServer = dhcpServer
+	clients.autoHosts = autoHosts
 	clients.addFromConfig(objects)
 
 	if !clients.testing {
-		go clients.periodicUpdate()
-
-		clients.registerWebHandlers()
+		clients.addFromDHCP()
+		clients.dhcpServer.SetOnLeaseChanged(clients.onDHCPLeaseChanged)
+		clients.autoHosts.SetOnChanged(clients.onHostsChanged)
 	}
+}
+
+// Start - start the module
+func (clients *clientsContainer) Start() {
+	if !clients.testing {
+		if !webHandlersRegistered {
+			webHandlersRegistered = true
+			clients.registerWebHandlers()
+		}
+		go clients.periodicUpdate()
+	}
+
+}
+
+// Reload - reload auto-clients
+func (clients *clientsContainer) Reload() {
+	clients.addFromSystemARP()
 }
 
 type clientObject struct {
 	Name                string   `yaml:"name"`
+	Tags                []string `yaml:"tags"`
 	IDs                 []string `yaml:"ids"`
 	UseGlobalSettings   bool     `yaml:"use_global_settings"`
 	FilteringEnabled    bool     `yaml:"filtering_enabled"`
 	ParentalEnabled     bool     `yaml:"parental_enabled"`
-	SafeSearchEnabled   bool     `yaml:"safebrowsing_enabled"`
-	SafeBrowsingEnabled bool     `yaml:"safesearch_enabled"`
+	SafeSearchEnabled   bool     `yaml:"safesearch_enabled"`
+	SafeBrowsingEnabled bool     `yaml:"safebrowsing_enabled"`
 
 	UseGlobalBlockedServices bool     `yaml:"use_global_blocked_services"`
 	BlockedServices          []string `yaml:"blocked_services"`
 
 	Upstreams []string `yaml:"upstreams"`
+}
+
+func (clients *clientsContainer) tagKnown(tag string) bool {
+	_, ok := clients.allTags[tag]
+	return ok
 }
 
 func (clients *clientsContainer) addFromConfig(objects []clientObject) {
@@ -115,10 +161,27 @@ func (clients *clientsContainer) addFromConfig(objects []clientObject) {
 			SafeBrowsingEnabled: cy.SafeBrowsingEnabled,
 
 			UseOwnBlockedServices: !cy.UseGlobalBlockedServices,
-			BlockedServices:       cy.BlockedServices,
 
 			Upstreams: cy.Upstreams,
 		}
+
+		for _, s := range cy.BlockedServices {
+			if !dnsfilter.BlockedSvcKnown(s) {
+				log.Debug("Clients: skipping unknown blocked-service '%s'", s)
+				continue
+			}
+			cli.BlockedServices = append(cli.BlockedServices, s)
+		}
+
+		for _, t := range cy.Tags {
+			if !clients.tagKnown(t) {
+				log.Debug("Clients: skipping unknown tag '%s'", t)
+				continue
+			}
+			cli.Tags = append(cli.Tags, t)
+		}
+		sort.Strings(cli.Tags)
+
 		_, err := clients.Add(cli)
 		if err != nil {
 			log.Tracef("clientAdd: %s", err)
@@ -128,38 +191,46 @@ func (clients *clientsContainer) addFromConfig(objects []clientObject) {
 
 // WriteDiskConfig - write configuration
 func (clients *clientsContainer) WriteDiskConfig(objects *[]clientObject) {
-	clientsList := clients.GetList()
-	for _, cli := range clientsList {
+	clients.lock.Lock()
+	for _, cli := range clients.list {
 		cy := clientObject{
-			Name:                cli.Name,
-			IDs:                 cli.IDs,
-			UseGlobalSettings:   !cli.UseOwnSettings,
-			FilteringEnabled:    cli.FilteringEnabled,
-			ParentalEnabled:     cli.ParentalEnabled,
-			SafeSearchEnabled:   cli.SafeSearchEnabled,
-			SafeBrowsingEnabled: cli.SafeBrowsingEnabled,
-
+			Name:                     cli.Name,
+			UseGlobalSettings:        !cli.UseOwnSettings,
+			FilteringEnabled:         cli.FilteringEnabled,
+			ParentalEnabled:          cli.ParentalEnabled,
+			SafeSearchEnabled:        cli.SafeSearchEnabled,
+			SafeBrowsingEnabled:      cli.SafeBrowsingEnabled,
 			UseGlobalBlockedServices: !cli.UseOwnBlockedServices,
-			BlockedServices:          cli.BlockedServices,
-
-			Upstreams: cli.Upstreams,
 		}
+
+		cy.Tags = stringArrayDup(cli.Tags)
+		cy.IDs = stringArrayDup(cli.IDs)
+		cy.BlockedServices = stringArrayDup(cli.BlockedServices)
+		cy.Upstreams = stringArrayDup(cli.Upstreams)
+
 		*objects = append(*objects, cy)
 	}
+	clients.lock.Unlock()
 }
 
 func (clients *clientsContainer) periodicUpdate() {
 	for {
-		clients.addFromHostsFile()
-		clients.addFromSystemARP()
-		clients.addFromDHCP()
+		clients.Reload()
 		time.Sleep(clientsUpdatePeriod)
 	}
 }
 
-// GetList returns the pointer to clients list
-func (clients *clientsContainer) GetList() map[string]*Client {
-	return clients.list
+func (clients *clientsContainer) onDHCPLeaseChanged(flags int) {
+	switch flags {
+	case dhcpd.LeaseChangedAdded,
+		dhcpd.LeaseChangedAddedStatic,
+		dhcpd.LeaseChangedRemovedStatic:
+		clients.addFromDHCP()
+	}
+}
+
+func (clients *clientsContainer) onHostsChanged() {
+	clients.addFromHostsFile()
 }
 
 // Exists checks if client with this IP already exists
@@ -167,7 +238,7 @@ func (clients *clientsContainer) Exists(ip string, source clientSource) bool {
 	clients.lock.Lock()
 	defer clients.lock.Unlock()
 
-	_, ok := clients.idIndex[ip]
+	_, ok := clients.findByIP(ip)
 	if ok {
 		return true
 	}
@@ -182,15 +253,60 @@ func (clients *clientsContainer) Exists(ip string, source clientSource) bool {
 	return true
 }
 
+func stringArrayDup(a []string) []string {
+	a2 := make([]string, len(a))
+	copy(a2, a)
+	return a2
+}
+
 // Find searches for a client by IP
 func (clients *clientsContainer) Find(ip string) (Client, bool) {
+	clients.lock.Lock()
+	defer clients.lock.Unlock()
+
+	c, ok := clients.findByIP(ip)
+	if !ok {
+		return Client{}, false
+	}
+	c.IDs = stringArrayDup(c.IDs)
+	c.Tags = stringArrayDup(c.Tags)
+	c.BlockedServices = stringArrayDup(c.BlockedServices)
+	c.Upstreams = stringArrayDup(c.Upstreams)
+	return c, true
+}
+
+// FindUpstreams looks for upstreams configured for the client
+// If no client found for this IP, or if no custom upstreams are configured,
+// this method returns nil
+func (clients *clientsContainer) FindUpstreams(ip string) *proxy.UpstreamConfig {
+	clients.lock.Lock()
+	defer clients.lock.Unlock()
+
+	c, ok := clients.findByIP(ip)
+	if !ok {
+		return nil
+	}
+
+	if len(c.Upstreams) == 0 {
+		return nil
+	}
+
+	if c.upstreamConfig == nil {
+		config, err := proxy.ParseUpstreamsConfig(c.Upstreams, config.DNS.BootstrapDNS, dnsforward.DefaultTimeout)
+		if err == nil {
+			c.upstreamConfig = &config
+		}
+	}
+
+	return c.upstreamConfig
+}
+
+// Find searches for a client by IP (and does not lock anything)
+func (clients *clientsContainer) findByIP(ip string) (Client, bool) {
 	ipAddr := net.ParseIP(ip)
 	if ipAddr == nil {
 		return Client{}, false
 	}
-
-	clients.lock.Lock()
-	defer clients.lock.Unlock()
 
 	c, ok := clients.idIndex[ip]
 	if ok {
@@ -249,9 +365,9 @@ func (clients *clientsContainer) FindAutoClient(ip string) (ClientHost, bool) {
 }
 
 // Check if Client object's fields are correct
-func (c *Client) check() error {
+func (clients *clientsContainer) check(c *Client) error {
 	if len(c.Name) == 0 {
-		return fmt.Errorf("Invalid Name")
+		return fmt.Errorf("invalid Name")
 	}
 
 	if len(c.IDs) == 0 {
@@ -275,13 +391,20 @@ func (c *Client) check() error {
 			continue
 		}
 
-		return fmt.Errorf("Invalid ID: %s", id)
+		return fmt.Errorf("invalid ID: %s", id)
 	}
+
+	for _, t := range c.Tags {
+		if !clients.tagKnown(t) {
+			return fmt.Errorf("invalid tag: %s", t)
+		}
+	}
+	sort.Strings(c.Tags)
 
 	if len(c.Upstreams) != 0 {
 		err := dnsforward.ValidateUpstreams(c.Upstreams)
 		if err != nil {
-			return fmt.Errorf("Invalid upstream servers: %s", err)
+			return fmt.Errorf("invalid upstream servers: %s", err)
 		}
 	}
 
@@ -291,7 +414,7 @@ func (c *Client) check() error {
 // Add a new client object
 // Return true: success;  false: client exists.
 func (clients *clientsContainer) Add(c Client) (bool, error) {
-	e := c.check()
+	e := clients.check(&c)
 	if e != nil {
 		return false, e
 	}
@@ -309,18 +432,7 @@ func (clients *clientsContainer) Add(c Client) (bool, error) {
 	for _, id := range c.IDs {
 		c2, ok := clients.idIndex[id]
 		if ok {
-			return false, fmt.Errorf("Another client uses the same ID (%s): %s", id, c2.Name)
-		}
-	}
-
-	// remove auto-clients with the same IP address, keeping WHOIS info if possible
-	for _, id := range c.IDs {
-		ch, ok := clients.ipHost[id]
-		if ok {
-			if len(c.WhoisInfo) == 0 {
-				c.WhoisInfo = ch.WhoisInfo
-			}
-			delete(clients.ipHost, id)
+			return false, fmt.Errorf("another client uses the same ID (%s): %s", id, c2.Name)
 		}
 	}
 
@@ -332,7 +444,7 @@ func (clients *clientsContainer) Add(c Client) (bool, error) {
 		clients.idIndex[id] = &c
 	}
 
-	log.Tracef("'%s': ID:%v [%d]", c.Name, c.IDs, len(clients.list))
+	log.Debug("Clients: added '%s': ID:%v [%d]", c.Name, c.IDs, len(clients.list))
 	return true, nil
 }
 
@@ -371,7 +483,7 @@ func arraysEqual(a, b []string) bool {
 
 // Update a client
 func (clients *clientsContainer) Update(name string, c Client) error {
-	err := c.check()
+	err := clients.check(&c)
 	if err != nil {
 		return err
 	}
@@ -381,14 +493,14 @@ func (clients *clientsContainer) Update(name string, c Client) error {
 
 	old, ok := clients.list[name]
 	if !ok {
-		return fmt.Errorf("Client not found")
+		return fmt.Errorf("client not found")
 	}
 
 	// check Name index
 	if old.Name != c.Name {
 		_, ok = clients.list[c.Name]
 		if ok {
-			return fmt.Errorf("Client already exists")
+			return fmt.Errorf("client already exists")
 		}
 	}
 
@@ -397,7 +509,7 @@ func (clients *clientsContainer) Update(name string, c Client) error {
 		for _, id := range c.IDs {
 			c2, ok := clients.idIndex[id]
 			if ok && c2 != old {
-				return fmt.Errorf("Another client uses the same ID (%s): %s", id, c2.Name)
+				return fmt.Errorf("another client uses the same ID (%s): %s", id, c2.Name)
 			}
 		}
 
@@ -416,6 +528,9 @@ func (clients *clientsContainer) Update(name string, c Client) error {
 		clients.list[c.Name] = old
 	}
 
+	// update upstreams cache
+	c.upstreamConfig = nil
+
 	*old = c
 	return nil
 }
@@ -425,10 +540,9 @@ func (clients *clientsContainer) SetWhoisInfo(ip string, info [][]string) {
 	clients.lock.Lock()
 	defer clients.lock.Unlock()
 
-	c, ok := clients.idIndex[ip]
+	_, ok := clients.findByIP(ip)
 	if ok {
-		c.WhoisInfo = info
-		log.Debug("Clients: set WHOIS info for client %s: %v", c.Name, c.WhoisInfo)
+		log.Debug("Clients: client for %s is already created, ignore WHOIS info", ip)
 		return
 	}
 
@@ -439,6 +553,7 @@ func (clients *clientsContainer) SetWhoisInfo(ip string, info [][]string) {
 		return
 	}
 
+	// Create a ClientHost implicitly so that we don't do this check again
 	ch = &ClientHost{
 		Source: ClientSourceWHOIS,
 	}
@@ -452,14 +567,12 @@ func (clients *clientsContainer) SetWhoisInfo(ip string, info [][]string) {
 //  so we overwrite existing entries with an equal or higher priority
 func (clients *clientsContainer) AddHost(ip, host string, source clientSource) (bool, error) {
 	clients.lock.Lock()
-	defer clients.lock.Unlock()
+	b, e := clients.addHost(ip, host, source)
+	clients.lock.Unlock()
+	return b, e
+}
 
-	// check index
-	_, ok := clients.idIndex[ip]
-	if ok {
-		return false, nil
-	}
-
+func (clients *clientsContainer) addHost(ip, host string, source clientSource) (bool, error) {
 	// check auto-clients index
 	ch, ok := clients.ipHost[ip]
 	if ok && ch.Source > source {
@@ -473,53 +586,49 @@ func (clients *clientsContainer) AddHost(ip, host string, source clientSource) (
 		}
 		clients.ipHost[ip] = ch
 	}
-	log.Tracef("'%s' -> '%s' [%d]", ip, host, len(clients.ipHost))
+	log.Debug("Clients: added '%s' -> '%s' [%d]", ip, host, len(clients.ipHost))
 	return true, nil
 }
 
-// Parse system 'hosts' file and fill clients array
-func (clients *clientsContainer) addFromHostsFile() {
-	hostsFn := "/etc/hosts"
-	if runtime.GOOS == "windows" {
-		hostsFn = os.ExpandEnv("$SystemRoot\\system32\\drivers\\etc\\hosts")
-	}
-
-	d, e := ioutil.ReadFile(hostsFn)
-	if e != nil {
-		log.Info("Can't read file %s: %v", hostsFn, e)
-		return
-	}
-
-	lines := strings.Split(string(d), "\n")
+// Remove all entries that match the specified source
+func (clients *clientsContainer) rmHosts(source clientSource) int {
 	n := 0
-	for _, ln := range lines {
-		ln = strings.TrimSpace(ln)
-		if len(ln) == 0 || ln[0] == '#' {
-			continue
+	for k, v := range clients.ipHost {
+		if v.Source == source {
+			delete(clients.ipHost, k)
+			n++
 		}
+	}
+	log.Debug("Clients: removed %d client aliases", n)
+	return n
+}
 
-		fields := strings.Fields(ln)
-		if len(fields) < 2 {
-			continue
-		}
+// Fill clients array from system hosts-file
+func (clients *clientsContainer) addFromHostsFile() {
+	hosts := clients.autoHosts.List()
 
-		ok, e := clients.AddHost(fields[0], fields[1], ClientSourceHostsFile)
-		if e != nil {
-			log.Tracef("%s", e)
+	clients.lock.Lock()
+	defer clients.lock.Unlock()
+	_ = clients.rmHosts(ClientSourceHostsFile)
+
+	n := 0
+	for ip, name := range hosts {
+		ok, err := clients.addHost(ip, name, ClientSourceHostsFile)
+		if err != nil {
+			log.Debug("Clients: %s", err)
 		}
 		if ok {
 			n++
 		}
 	}
 
-	log.Debug("Added %d client aliases from %s", n, hostsFn)
+	log.Debug("Clients: added %d client aliases from system hosts-file", n)
 }
 
 // Add IP -> Host pairs from the system's `arp -a` command output
 // The command's output is:
 // HOST (IP) at MAC on IFACE
 func (clients *clientsContainer) addFromSystemARP() {
-
 	if runtime.GOOS == "windows" {
 		return
 	}
@@ -532,6 +641,10 @@ func (clients *clientsContainer) addFromSystemARP() {
 			cmd.Path, err, cmd.ProcessState.ExitCode())
 		return
 	}
+
+	clients.lock.Lock()
+	defer clients.lock.Unlock()
+	_ = clients.rmHosts(ClientSourceARP)
 
 	n := 0
 	lines := strings.Split(string(data), "\n")
@@ -549,7 +662,7 @@ func (clients *clientsContainer) addFromSystemARP() {
 			continue
 		}
 
-		ok, e := clients.AddHost(ip, host, ClientSourceARP)
+		ok, e := clients.addHost(ip, host, ClientSourceARP)
 		if e != nil {
 			log.Tracef("%s", e)
 		}
@@ -558,24 +671,30 @@ func (clients *clientsContainer) addFromSystemARP() {
 		}
 	}
 
-	log.Debug("Added %d client aliases from 'arp -a' command output", n)
+	log.Debug("Clients: added %d client aliases from 'arp -a' command output", n)
 }
 
-// add clients from DHCP that have non-empty Hostname property
+// Add clients from DHCP that have non-empty Hostname property
 func (clients *clientsContainer) addFromDHCP() {
 	if clients.dhcpServer == nil {
 		return
 	}
-	leases := clients.dhcpServer.Leases()
+
+	clients.lock.Lock()
+	defer clients.lock.Unlock()
+
+	_ = clients.rmHosts(ClientSourceDHCP)
+
+	leases := clients.dhcpServer.Leases(dhcpd.LeasesAll)
 	n := 0
 	for _, l := range leases {
 		if len(l.Hostname) == 0 {
 			continue
 		}
-		ok, _ := clients.AddHost(l.IP.String(), l.Hostname, ClientSourceDHCP)
+		ok, _ := clients.addHost(l.IP.String(), l.Hostname, ClientSourceDHCP)
 		if ok {
 			n++
 		}
 	}
-	log.Debug("Added %d client aliases from DHCP", n)
+	log.Debug("Clients: added %d client aliases from DHCP", n)
 }

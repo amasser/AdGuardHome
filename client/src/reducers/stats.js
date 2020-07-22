@@ -1,4 +1,5 @@
 import { handleActions } from 'redux-actions';
+import { normalizeTopClients } from '../helpers/helpers';
 
 import * as actions from '../actions/stats';
 
@@ -20,24 +21,24 @@ const defaultStats = {
 
 const stats = handleActions(
     {
-        [actions.getStatsConfigRequest]: state => ({ ...state, processingGetConfig: true }),
-        [actions.getStatsConfigFailure]: state => ({ ...state, processingGetConfig: false }),
+        [actions.getStatsConfigRequest]: (state) => ({ ...state, processingGetConfig: true }),
+        [actions.getStatsConfigFailure]: (state) => ({ ...state, processingGetConfig: false }),
         [actions.getStatsConfigSuccess]: (state, { payload }) => ({
             ...state,
             interval: payload.interval,
             processingGetConfig: false,
         }),
 
-        [actions.setStatsConfigRequest]: state => ({ ...state, processingSetConfig: true }),
-        [actions.setStatsConfigFailure]: state => ({ ...state, processingSetConfig: false }),
+        [actions.setStatsConfigRequest]: (state) => ({ ...state, processingSetConfig: true }),
+        [actions.setStatsConfigFailure]: (state) => ({ ...state, processingSetConfig: false }),
         [actions.setStatsConfigSuccess]: (state, { payload }) => ({
             ...state,
             interval: payload.interval,
             processingSetConfig: false,
         }),
 
-        [actions.getStatsRequest]: state => ({ ...state, processingStats: true }),
-        [actions.getStatsFailure]: state => ({ ...state, processingStats: false }),
+        [actions.getStatsRequest]: (state) => ({ ...state, processingStats: true }),
+        [actions.getStatsFailure]: (state) => ({ ...state, processingStats: false }),
         [actions.getStatsSuccess]: (state, { payload }) => {
             const {
                 dns_queries: dnsQueries,
@@ -64,6 +65,7 @@ const stats = handleActions(
                 replacedSafebrowsing,
                 topBlockedDomains,
                 topClients,
+                normalizedTopClients: normalizeTopClients(topClients),
                 topQueriedDomains,
                 numBlockedFiltering,
                 numDnsQueries,
@@ -76,9 +78,9 @@ const stats = handleActions(
             return newState;
         },
 
-        [actions.resetStatsRequest]: state => ({ ...state, processingReset: true }),
-        [actions.resetStatsFailure]: state => ({ ...state, processingReset: false }),
-        [actions.resetStatsSuccess]: state => ({
+        [actions.resetStatsRequest]: (state) => ({ ...state, processingReset: true }),
+        [actions.resetStatsFailure]: (state) => ({ ...state, processingReset: false }),
+        [actions.resetStatsSuccess]: (state) => ({
             ...state,
             ...defaultStats,
             processingReset: false,

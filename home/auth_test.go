@@ -47,7 +47,7 @@ func TestAuth(t *testing.T) {
 
 	// add session with TTL = 2 sec
 	s = session{}
-	s.expire = uint32(now + 2)
+	s.expire = uint32(time.Now().UTC().Unix() + 2)
 	a.addSession(sess, &s)
 	assert.True(t, a.CheckSession(sessStr) == 0)
 
@@ -59,7 +59,7 @@ func TestAuth(t *testing.T) {
 	// the session is still alive
 	assert.True(t, a.CheckSession(sessStr) == 0)
 	// reset our expiration time because CheckSession() has just updated it
-	s.expire = uint32(now + 2)
+	s.expire = uint32(time.Now().UTC().Unix() + 2)
 	a.storeSession(sess, &s)
 	a.Close()
 
@@ -100,7 +100,7 @@ func TestAuthHTTP(t *testing.T) {
 	users := []User{
 		User{Name: "name", PasswordHash: "$2y$05$..vyzAECIhJPfaQiOK17IukcQnqEgKJHy0iETyYqxn3YXJl8yZuo2"},
 	}
-	config.auth = InitAuth(fn, users, 60)
+	Context.auth = InitAuth(fn, users, 60)
 
 	handlerCalled := false
 	handler := func(w http.ResponseWriter, r *http.Request) {
@@ -129,7 +129,7 @@ func TestAuthHTTP(t *testing.T) {
 	assert.True(t, handlerCalled)
 
 	// perform login
-	cookie := config.auth.httpCookie(loginJSON{Name: "name", Password: "password"})
+	cookie := Context.auth.httpCookie(loginJSON{Name: "name", Password: "password"})
 	assert.True(t, cookie != "")
 
 	// get /
@@ -173,5 +173,5 @@ func TestAuthHTTP(t *testing.T) {
 	assert.True(t, handlerCalled)
 	r.Header.Del("Cookie")
 
-	config.auth.Close()
+	Context.auth.Close()
 }

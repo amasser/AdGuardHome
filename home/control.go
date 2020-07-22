@@ -3,7 +3,11 @@ package home
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 
 	"github.com/AdguardTeam/AdGuardHome/dnsforward"
 	"github.com/AdguardTeam/golibs/log"
@@ -21,9 +25,6 @@ func returnOK(w http.ResponseWriter) {
 	}
 }
 
-func httpOK(r *http.Request, w http.ResponseWriter) {
-}
-
 func httpError(w http.ResponseWriter, code int, format string, args ...interface{}) {
 	text := fmt.Sprintf(format, args...)
 	log.Info(text)
@@ -33,15 +34,6 @@ func httpError(w http.ResponseWriter, code int, format string, args ...interface
 // ---------------
 // dns run control
 // ---------------
-func writeAllConfigsAndReloadDNS() error {
-	err := writeAllConfigs()
-	if err != nil {
-		log.Error("Couldn't write all configs: %s", err)
-		return err
-	}
-	return reconfigureDNSServer()
-}
-
 func addDNSAddress(dnsAddresses *[]string, addr string) {
 	if config.DNS.Port != 53 {
 		addr = fmt.Sprintf("%s:%d", addr, config.DNS.Port)
@@ -49,52 +41,10 @@ func addDNSAddress(dnsAddresses *[]string, addr string) {
 	*dnsAddresses = append(*dnsAddresses, addr)
 }
 
-// Get the list of DNS addresses the server is listening on
-func getDNSAddresses() []string {
-	dnsAddresses := []string{}
-
-	if config.DNS.BindHost == "0.0.0.0" {
-
-		ifaces, e := getValidNetInterfacesForWeb()
-		if e != nil {
-			log.Error("Couldn't get network interfaces: %v", e)
-			return []string{}
-		}
-
-		for _, iface := range ifaces {
-			for _, addr := range iface.Addresses {
-				addDNSAddress(&dnsAddresses, addr)
-			}
-		}
-
-	} else {
-		addDNSAddress(&dnsAddresses, config.DNS.BindHost)
-	}
-
-	if config.TLS.Enabled && len(config.TLS.ServerName) != 0 {
-
-		if config.TLS.PortHTTPS != 0 {
-			addr := config.TLS.ServerName
-			if config.TLS.PortHTTPS != 443 {
-				addr = fmt.Sprintf("%s:%d", addr, config.TLS.PortHTTPS)
-			}
-			addr = fmt.Sprintf("https://%s/dns-query", addr)
-			dnsAddresses = append(dnsAddresses, addr)
-		}
-
-		if config.TLS.PortDNSOverTLS != 0 {
-			addr := fmt.Sprintf("tls://%s:%d", config.TLS.ServerName, config.TLS.PortDNSOverTLS)
-			dnsAddresses = append(dnsAddresses, addr)
-		}
-	}
-
-	return dnsAddresses
-}
-
 func handleStatus(w http.ResponseWriter, r *http.Request) {
 	c := dnsforward.FilteringConfig{}
-	if config.dnsServer != nil {
-		config.dnsServer.WriteDiskConfig(&c)
+	if Context.dnsServer != nil {
+		Context.dnsServer.WriteDiskConfig(&c)
 	}
 	data := map[string]interface{}{
 		"dns_addresses": getDNSAddresses(),
@@ -105,9 +55,6 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 		"language":      config.Language,
 
 		"protection_enabled": c.ProtectionEnabled,
-		"bootstrap_dns":      c.BootstrapDNS,
-		"upstream_dns":       c.UpstreamDNS,
-		"all_servers":        c.AllServers,
 	}
 
 	jsonVal, err := json.Marshal(data)
@@ -129,7 +76,7 @@ type profileJSON struct {
 
 func handleGetProfile(w http.ResponseWriter, r *http.Request) {
 	pj := profileJSON{}
-	u := config.auth.GetCurrentUser(r)
+	u := Context.auth.GetCurrentUser(r)
 	pj.Name = u.Name
 
 	data, err := json.Marshal(pj)
@@ -138,23 +85,6 @@ func handleGetProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = w.Write(data)
-}
-
-// --------------
-// DNS-over-HTTPS
-// --------------
-func handleDOH(w http.ResponseWriter, r *http.Request) {
-	if r.TLS == nil {
-		httpError(w, http.StatusNotFound, "Not Found")
-		return
-	}
-
-	if !isRunning() {
-		httpError(w, http.StatusInternalServerError, "DNS server is not running")
-		return
-	}
-
-	config.dnsServer.ServeHTTP(w, r)
 }
 
 // ------------------------
@@ -168,15 +98,133 @@ func registerControlHandlers() {
 	httpRegister(http.MethodPost, "/control/update", handleUpdate)
 
 	httpRegister("GET", "/control/profile", handleGetProfile)
-
-	RegisterFilteringHandlers()
-	RegisterTLSHandlers()
-	RegisterBlockedServicesHandlers()
 	RegisterAuthHandlers()
-
-	http.HandleFunc("/dns-query", postInstall(handleDOH))
 }
 
 func httpRegister(method string, url string, handler func(http.ResponseWriter, *http.Request)) {
+	if len(method) == 0 {
+		// "/dns-query" handler doesn't need auth, gzip and isn't restricted by 1 HTTP method
+		http.HandleFunc(url, postInstall(handler))
+		return
+	}
+
 	http.Handle(url, postInstallHandler(optionalAuthHandler(gziphandler.GzipHandler(ensureHandler(method, handler)))))
+}
+
+// ----------------------------------
+// helper functions for HTTP handlers
+// ----------------------------------
+func ensure(method string, handler func(http.ResponseWriter, *http.Request)) func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.Debug("%s %v", r.Method, r.URL)
+
+		if r.Method != method {
+			http.Error(w, "This request must be "+method, http.StatusMethodNotAllowed)
+			return
+		}
+
+		if method == "POST" || method == "PUT" || method == "DELETE" {
+			Context.controlLock.Lock()
+			defer Context.controlLock.Unlock()
+		}
+
+		handler(w, r)
+	}
+}
+
+func ensurePOST(handler func(http.ResponseWriter, *http.Request)) func(http.ResponseWriter, *http.Request) {
+	return ensure("POST", handler)
+}
+
+func ensureGET(handler func(http.ResponseWriter, *http.Request)) func(http.ResponseWriter, *http.Request) {
+	return ensure("GET", handler)
+}
+
+// Bridge between http.Handler object and Go function
+type httpHandler struct {
+	handler func(http.ResponseWriter, *http.Request)
+}
+
+func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.handler(w, r)
+}
+
+func ensureHandler(method string, handler func(http.ResponseWriter, *http.Request)) http.Handler {
+	h := httpHandler{}
+	h.handler = ensure(method, handler)
+	return &h
+}
+
+// preInstall lets the handler run only if firstRun is true, no redirects
+func preInstall(handler func(http.ResponseWriter, *http.Request)) func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !Context.firstRun {
+			// if it's not first run, don't let users access it (for example /install.html when configuration is done)
+			http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+			return
+		}
+		handler(w, r)
+	}
+}
+
+// preInstallStruct wraps preInstall into a struct that can be returned as an interface where necessary
+type preInstallHandlerStruct struct {
+	handler http.Handler
+}
+
+func (p *preInstallHandlerStruct) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	preInstall(p.handler.ServeHTTP)(w, r)
+}
+
+// preInstallHandler returns http.Handler interface for preInstall wrapper
+func preInstallHandler(handler http.Handler) http.Handler {
+	return &preInstallHandlerStruct{handler}
+}
+
+// postInstall lets the handler run only if firstRun is false, and redirects to /install.html otherwise
+// it also enforces HTTPS if it is enabled and configured
+func postInstall(handler func(http.ResponseWriter, *http.Request)) func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		if Context.firstRun &&
+			!strings.HasPrefix(r.URL.Path, "/install.") &&
+			!strings.HasPrefix(r.URL.Path, "/assets/") {
+			http.Redirect(w, r, "/install.html", http.StatusFound)
+			return
+		}
+
+		// enforce https?
+		if r.TLS == nil && Context.web.forceHTTPS && Context.web.httpsServer.server != nil {
+			// yes, and we want host from host:port
+			host, _, err := net.SplitHostPort(r.Host)
+			if err != nil {
+				// no port in host
+				host = r.Host
+			}
+			// construct new URL to redirect to
+			newURL := url.URL{
+				Scheme:   "https",
+				Host:     net.JoinHostPort(host, strconv.Itoa(Context.web.portHTTPS)),
+				Path:     r.URL.Path,
+				RawQuery: r.URL.RawQuery,
+			}
+			http.Redirect(w, r, newURL.String(), http.StatusTemporaryRedirect)
+			return
+		}
+
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		handler(w, r)
+	}
+}
+
+type postInstallHandlerStruct struct {
+	handler http.Handler
+}
+
+func (p *postInstallHandlerStruct) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	postInstall(p.handler.ServeHTTP)(w, r)
+}
+
+func postInstallHandler(handler http.Handler) http.Handler {
+	return &postInstallHandlerStruct{handler}
 }

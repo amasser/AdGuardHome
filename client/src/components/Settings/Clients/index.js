@@ -1,5 +1,5 @@
 import React, { Component, Fragment } from 'react';
-import { withNamespaces } from 'react-i18next';
+import { withTranslation } from 'react-i18next';
 import PropTypes from 'prop-types';
 
 import ClientsTable from './ClientsTable';
@@ -23,6 +23,7 @@ class Clients extends Component {
             updateClient,
             deleteClient,
             toggleClientModal,
+            getStats,
         } = this.props;
 
         return (
@@ -33,7 +34,7 @@ class Clients extends Component {
                     <Fragment>
                         <ClientsTable
                             clients={dashboard.clients}
-                            topClients={stats.topClients}
+                            normalizedTopClients={stats.normalizedTopClients}
                             isModalOpen={clients.isModalOpen}
                             modalClientName={clients.modalClientName}
                             modalType={clients.modalType}
@@ -44,10 +45,12 @@ class Clients extends Component {
                             processingAdding={clients.processingAdding}
                             processingDeleting={clients.processingDeleting}
                             processingUpdating={clients.processingUpdating}
+                            getStats={getStats}
+                            supportedTags={dashboard.supportedTags}
                         />
                         <AutoClients
                             autoClients={dashboard.autoClients}
-                            topClients={stats.topClients}
+                            normalizedTopClients={stats.normalizedTopClients}
                         />
                     </Fragment>
                 )}
@@ -69,4 +72,4 @@ Clients.propTypes = {
     getStats: PropTypes.func.isRequired,
 };
 
-export default withNamespaces()(Clients);
+export default withTranslation()(Clients);

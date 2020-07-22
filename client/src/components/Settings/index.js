@@ -1,11 +1,11 @@
 import React, { Component, Fragment } from 'react';
 import PropTypes from 'prop-types';
-import { withNamespaces } from 'react-i18next';
+import { withTranslation } from 'react-i18next';
 
-import Services from './Services';
 import StatsConfig from './StatsConfig';
 import LogsConfig from './LogsConfig';
 import FiltersConfig from './FiltersConfig';
+
 import Checkbox from '../ui/Checkbox';
 import Loading from '../ui/Loading';
 import PageTitle from '../ui/PageTitle';
@@ -34,7 +34,6 @@ class Settings extends Component {
 
     componentDidMount() {
         this.props.initSettings(this.settings);
-        this.props.getBlockedServices();
         this.props.getStatsConfig();
         this.props.getLogsConfig();
         this.props.getFilteringStatus();
@@ -62,8 +61,6 @@ class Settings extends Component {
     render() {
         const {
             settings,
-            services,
-            setBlockedServices,
             setStatsConfig,
             resetStats,
             stats,
@@ -75,11 +72,9 @@ class Settings extends Component {
             t,
         } = this.props;
 
-        const isDataReady =
-            !settings.processing &&
-            !services.processing &&
-            !stats.processingGetConfig &&
-            !queryLogs.processingGetConfig;
+        const isDataReady = !settings.processing
+            && !stats.processingGetConfig
+            && !queryLogs.processingGetConfig;
 
         return (
             <Fragment>
@@ -92,8 +87,10 @@ class Settings extends Component {
                                 <Card bodyType="card-body box-body--settings">
                                     <div className="form">
                                         <FiltersConfig
-                                            interval={filtering.interval}
-                                            enabled={filtering.enabled}
+                                            initialValues={{
+                                                interval: filtering.interval,
+                                                enabled: filtering.enabled,
+                                            }}
                                             processing={filtering.processingSetConfig}
                                             setFiltersConfig={setFiltersConfig}
                                         />
@@ -105,6 +102,7 @@ class Settings extends Component {
                                 <LogsConfig
                                     enabled={queryLogs.enabled}
                                     interval={queryLogs.interval}
+                                    anonymize_client_ip={queryLogs.anonymize_client_ip}
                                     processing={queryLogs.processingSetConfig}
                                     processingClear={queryLogs.processingClear}
                                     setLogsConfig={setLogsConfig}
@@ -118,12 +116,6 @@ class Settings extends Component {
                                     processingReset={stats.processingReset}
                                     setStatsConfig={setStatsConfig}
                                     resetStats={resetStats}
-                                />
-                            </div>
-                            <div className="col-md-12">
-                                <Services
-                                    services={services}
-                                    setBlockedServices={setBlockedServices}
                                 />
                             </div>
                         </div>
@@ -144,6 +136,28 @@ Settings.propTypes = {
     setFiltersConfig: PropTypes.func.isRequired,
     getFilteringStatus: PropTypes.func.isRequired,
     t: PropTypes.func.isRequired,
+    getLogsConfig: PropTypes.func,
+    setLogsConfig: PropTypes.func,
+    clearLogs: PropTypes.func,
+    stats: PropTypes.shape({
+        processingGetConfig: PropTypes.bool,
+        interval: PropTypes.number,
+        processingSetConfig: PropTypes.bool,
+        processingReset: PropTypes.bool,
+    }),
+    queryLogs: PropTypes.shape({
+        enabled: PropTypes.bool,
+        interval: PropTypes.number,
+        anonymize_client_ip: PropTypes.bool,
+        processingSetConfig: PropTypes.bool,
+        processingClear: PropTypes.bool,
+        processingGetConfig: PropTypes.bool,
+    }),
+    filtering: PropTypes.shape({
+        interval: PropTypes.number,
+        enabled: PropTypes.bool,
+        processingSetConfig: PropTypes.bool,
+    }),
 };
 
-export default withNamespaces()(Settings);
+export default withTranslation()(Settings);

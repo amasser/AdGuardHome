@@ -1,7 +1,7 @@
 import React, { Component, Fragment } from 'react';
 import PropTypes from 'prop-types';
 import classnames from 'classnames';
-import { Trans, withNamespaces } from 'react-i18next';
+import { Trans, withTranslation } from 'react-i18next';
 
 import { DHCP_STATUS_RESPONSE } from '../../../helpers/constants';
 import Form from './Form';
@@ -32,8 +32,8 @@ class Dhcp extends Component {
         const {
             config, check, processingDhcp, processingConfig,
         } = this.props.dhcp;
-        const otherDhcpFound =
-            check && check.otherServer && check.otherServer.found === DHCP_STATUS_RESPONSE.YES;
+        const otherDhcpFound = check?.otherServer
+            && check.otherServer.found === DHCP_STATUS_RESPONSE.YES;
         const filledConfig = Object.keys(config).every((key) => {
             if (key === 'enabled' || key === 'icmp_timeout_msec') {
                 return true;
@@ -127,10 +127,10 @@ class Dhcp extends Component {
                     <hr className="mt-4 mb-4" />
                 </Fragment>
             );
-        } else if (
-            check.staticIP.static === DHCP_STATUS_RESPONSE.NO &&
-            check.staticIP.ip &&
-            interfaceName
+        } if (
+            check.staticIP.static === DHCP_STATUS_RESPONSE.NO
+            && check.staticIP.ip
+            && interfaceName
         ) {
             return (
                 <Fragment>
@@ -219,46 +219,44 @@ class Dhcp extends Component {
                             </div>
                         </Card>
                         {dhcp.config.enabled && (
-                            <Fragment>
-                                <Card
-                                    title={t('dhcp_leases')}
-                                    bodyType="card-body box-body--settings"
-                                >
-                                    <div className="row">
-                                        <div className="col">
-                                            <Leases leases={dhcp.leases} />
-                                        </div>
+                            <Card
+                                title={t('dhcp_leases')}
+                                bodyType="card-body box-body--settings"
+                            >
+                                <div className="row">
+                                    <div className="col">
+                                        <Leases leases={dhcp.leases} />
                                     </div>
-                                </Card>
-                                <Card
-                                    title={t('dhcp_static_leases')}
-                                    bodyType="card-body box-body--settings"
-                                >
-                                    <div className="row">
-                                        <div className="col-12">
-                                            <StaticLeases
-                                                staticLeases={dhcp.staticLeases}
-                                                isModalOpen={dhcp.isModalOpen}
-                                                addStaticLease={addStaticLease}
-                                                removeStaticLease={removeStaticLease}
-                                                toggleLeaseModal={toggleLeaseModal}
-                                                processingAdding={dhcp.processingAdding}
-                                                processingDeleting={dhcp.processingDeleting}
-                                            />
-                                        </div>
-                                        <div className="col-12">
-                                            <button
-                                                type="button"
-                                                className="btn btn-success btn-standard mt-3"
-                                                onClick={() => toggleLeaseModal()}
-                                            >
-                                                <Trans>dhcp_add_static_lease</Trans>
-                                            </button>
-                                        </div>
-                                    </div>
-                                </Card>
-                            </Fragment>
+                                </div>
+                            </Card>
                         )}
+                        <Card
+                            title={t('dhcp_static_leases')}
+                            bodyType="card-body box-body--settings"
+                        >
+                            <div className="row">
+                                <div className="col-12">
+                                    <StaticLeases
+                                        staticLeases={dhcp.staticLeases}
+                                        isModalOpen={dhcp.isModalOpen}
+                                        addStaticLease={addStaticLease}
+                                        removeStaticLease={removeStaticLease}
+                                        toggleLeaseModal={toggleLeaseModal}
+                                        processingAdding={dhcp.processingAdding}
+                                        processingDeleting={dhcp.processingDeleting}
+                                    />
+                                </div>
+                                <div className="col-12">
+                                    <button
+                                        type="button"
+                                        className="btn btn-success btn-standard mt-3"
+                                        onClick={() => toggleLeaseModal()}
+                                    >
+                                        <Trans>dhcp_add_static_lease</Trans>
+                                    </button>
+                                </div>
+                            </div>
+                        </Card>
                     </Fragment>
                 )}
             </Fragment>
@@ -280,4 +278,4 @@ Dhcp.propTypes = {
     resetDhcp: PropTypes.func.isRequired,
 };
 
-export default withNamespaces()(Dhcp);
+export default withTranslation()(Dhcp);

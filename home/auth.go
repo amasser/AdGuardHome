@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/AdguardTeam/golibs/log"
-	"github.com/etcd-io/bbolt"
+	"go.etcd.io/bbolt"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -71,6 +71,8 @@ type User struct {
 
 // InitAuth - create a global object
 func InitAuth(dbFilename string, users []User, sessionTTL uint32) *Auth {
+	log.Info("Initializing auth module: %s", dbFilename)
+
 	a := Auth{}
 	a.sessionTTL = sessionTTL
 	a.sessions = make(map[string]*session)
@@ -78,12 +80,15 @@ func InitAuth(dbFilename string, users []User, sessionTTL uint32) *Auth {
 	var err error
 	a.db, err = bbolt.Open(dbFilename, 0644, nil)
 	if err != nil {
-		log.Error("Auth: bbolt.Open: %s", err)
+		log.Error("Auth: open DB: %s: %s", dbFilename, err)
+		if err.Error() == "invalid argument" {
+			log.Error("AdGuard Home cannot be initialized due to an incompatible file system.\nPlease read the explanation here: https://github.com/AdguardTeam/AdGuardHome/wiki/Getting-Started#limitations")
+		}
 		return nil
 	}
 	a.loadSessions()
 	a.users = users
-	log.Debug("Auth: initialized.  users:%d  sessions:%d", len(a.users), len(a.sessions))
+	log.Info("Auth: initialized.  users:%d  sessions:%d", len(a.users), len(a.sessions))
 	return &a
 }
 
@@ -152,7 +157,7 @@ func (a *Auth) addSession(data []byte, s *session) {
 	a.sessions[name] = s
 	a.lock.Unlock()
 	if a.storeSession(data, s) {
-		log.Info("Auth: created session %s: expire=%d", name, s.expire)
+		log.Debug("Auth: created session %s: expire=%d", name, s.expire)
 	}
 }
 
@@ -307,7 +312,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cookie := config.auth.httpCookie(req)
+	cookie := Context.auth.httpCookie(req)
 	if len(cookie) == 0 {
 		log.Info("Auth: invalid user name or password: name='%s'", req.Name)
 		time.Sleep(1 * time.Second)
@@ -328,7 +333,7 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 	cookie := r.Header.Get("Cookie")
 	sess := parseCookie(cookie)
 
-	config.auth.RemoveSession(sess)
+	Context.auth.RemoveSession(sess)
 
 	w.Header().Set("Location", "/login.html")
 
@@ -360,44 +365,50 @@ func parseCookie(cookie string) string {
 	return ""
 }
 
+// nolint(gocyclo)
 func optionalAuth(handler func(http.ResponseWriter, *http.Request)) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		if r.URL.Path == "/login.html" {
 			// redirect to dashboard if already authenticated
-			authRequired := config.auth != nil && config.auth.AuthRequired()
+			authRequired := Context.auth != nil && Context.auth.AuthRequired()
 			cookie, err := r.Cookie(sessionCookieName)
 			if authRequired && err == nil {
-				r := config.auth.CheckSession(cookie.Value)
+				r := Context.auth.CheckSession(cookie.Value)
 				if r == 0 {
 					w.Header().Set("Location", "/")
 					w.WriteHeader(http.StatusFound)
 					return
 				} else if r < 0 {
-					log.Info("Auth: invalid cookie value: %s", cookie)
+					log.Debug("Auth: invalid cookie value: %s", cookie)
 				}
 			}
 
-		} else if r.URL.Path == "/favicon.png" ||
+		} else if strings.HasPrefix(r.URL.Path, "/assets/") ||
 			strings.HasPrefix(r.URL.Path, "/login.") {
 			// process as usual
-
-		} else if config.auth != nil && config.auth.AuthRequired() {
+			// no additional auth requirements
+		} else if Context.auth != nil && Context.auth.AuthRequired() {
 			// redirect to login page if not authenticated
 			ok := false
 			cookie, err := r.Cookie(sessionCookieName)
-			if err == nil {
-				r := config.auth.CheckSession(cookie.Value)
+
+			if glProcessCookie(r) {
+				log.Debug("Auth: authentification was handled by GL-Inet submodule")
+				ok = true
+
+			} else if err == nil {
+				r := Context.auth.CheckSession(cookie.Value)
 				if r == 0 {
 					ok = true
 				} else if r < 0 {
-					log.Info("Auth: invalid cookie value: %s", cookie)
+					log.Debug("Auth: invalid cookie value: %s", cookie)
 				}
 			} else {
 				// there's no Cookie, check Basic authentication
 				user, pass, ok2 := r.BasicAuth()
 				if ok2 {
-					u := config.auth.UserFind(user, pass)
+					u := Context.auth.UserFind(user, pass)
 					if len(u.Name) != 0 {
 						ok = true
 					} else {
@@ -406,8 +417,18 @@ func optionalAuth(handler func(http.ResponseWriter, *http.Request)) func(http.Re
 				}
 			}
 			if !ok {
-				w.Header().Set("Location", "/login.html")
-				w.WriteHeader(http.StatusFound)
+				if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+					if glProcessRedirect(w, r) {
+						log.Debug("Auth: redirected to login page by GL-Inet submodule")
+
+					} else {
+						w.Header().Set("Location", "/login.html")
+						w.WriteHeader(http.StatusFound)
+					}
+				} else {
+					w.WriteHeader(http.StatusForbidden)
+					_, _ = w.Write([]byte("Forbidden"))
+				}
 				return
 			}
 		}
@@ -468,7 +489,7 @@ func (a *Auth) GetCurrentUser(r *http.Request) User {
 		// there's no Cookie, check Basic authentication
 		user, pass, ok := r.BasicAuth()
 		if ok {
-			u := config.auth.UserFind(user, pass)
+			u := Context.auth.UserFind(user, pass)
 			return u
 		}
 		return User{}
@@ -500,6 +521,10 @@ func (a *Auth) GetUsers() []User {
 
 // AuthRequired - if authentication is required
 func (a *Auth) AuthRequired() bool {
+	if GLMode {
+		return true
+	}
+
 	a.lock.Lock()
 	r := (len(a.users) != 0)
 	a.lock.Unlock()

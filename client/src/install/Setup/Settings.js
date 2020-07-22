@@ -1,64 +1,59 @@
-import React, { Component, Fragment } from 'react';
+import React, { Component } from 'react';
 import { connect } from 'react-redux';
 import PropTypes from 'prop-types';
 import { Field, reduxForm, formValueSelector } from 'redux-form';
-import { Trans, withNamespaces } from 'react-i18next';
+import { Trans, withTranslation } from 'react-i18next';
 import flow from 'lodash/flow';
 
 import Controls from './Controls';
 import AddressList from './AddressList';
-import renderField from './renderField';
+
 import { getInterfaceIp } from '../../helpers/helpers';
-import { ALL_INTERFACES_IP } from '../../helpers/constants';
+import {
+    ALL_INTERFACES_IP, FORM_NAME, ADDRESS_IN_USE_TEXT, PORT_53_FAQ_LINK, UBUNTU_SYSTEM_PORT,
+} from '../../helpers/constants';
+import { renderInputField, toNumber } from '../../helpers/form';
+import { validateRequiredValue, validateInstallPort } from '../../helpers/validators';
 
-const required = (value) => {
-    if (value || value === 0) {
-        return false;
-    }
-    return <Trans>form_error_required</Trans>;
+const STATIC_STATUS = {
+    ENABLED: 'yes',
+    DISABLED: 'no',
+    ERROR: 'error',
 };
 
-const port = (value) => {
-    if (value < 1 || value > 65535) {
-        return <Trans>form_error_port</Trans>;
-    }
-    return false;
-};
+const renderInterfaces = ((interfaces) => (
+    Object.keys(interfaces)
+        .map((item) => {
+            const option = interfaces[item];
+            const {
+                name,
+                ip_addresses,
+                flags,
+            } = option;
 
-const toNumber = value => value && parseInt(value, 10);
+            if (option && ip_addresses?.length > 0) {
+                const ip = getInterfaceIp(option);
+                const isDown = flags?.includes('down');
 
-const renderInterfaces = (interfaces => (
-    Object.keys(interfaces).map((item) => {
-        const option = interfaces[item];
-        const {
-            name,
-            ip_addresses,
-            flags,
-        } = option;
+                if (isDown) {
+                    return (
+                        <option value={ip} key={name} disabled>
+                            <>
+                                {name} - {ip} (<Trans>down</Trans>)
+                            </>
+                        </option>
+                    );
+                }
 
-        if (option && ip_addresses && ip_addresses.length > 0) {
-            const ip = getInterfaceIp(option);
-            const isDown = flags && flags.includes('down');
-
-            if (isDown) {
                 return (
-                    <option value={ip} key={name} disabled>
-                        <Fragment>
-                            {name} - {ip} (<Trans>down</Trans>)
-                        </Fragment>
+                    <option value={ip} key={name}>
+                        {name} - {ip}
                     </option>
                 );
             }
 
-            return (
-                <option value={ip} key={name}>
-                    {name} - {ip}
-                </option>
-            );
-        }
-
-        return false;
-    })
+            return false;
+        })
 ));
 
 class Settings extends Component {
@@ -79,11 +74,107 @@ class Settings extends Component {
         });
     }
 
+    getStaticIpMessage = (staticIp) => {
+        const { static: status, ip } = staticIp;
+
+        if (!status) {
+            return '';
+        }
+
+        return (
+            <>
+                {status === STATIC_STATUS.DISABLED && (
+                    <>
+                        <div className="mb-2">
+                            <Trans values={{ ip }} components={[<strong key="0">text</strong>]}>
+                                install_static_configure
+                            </Trans>
+                        </div>
+                        <button
+                            type="button"
+                            className="btn btn-outline-primary btn-sm"
+                            onClick={() => this.handleStaticIp(ip)}
+                        >
+                            <Trans>set_static_ip</Trans>
+                        </button>
+                    </>
+                )}
+                {status === STATIC_STATUS.ERROR && (
+                    <div className="text-danger">
+                        <Trans>install_static_error</Trans>
+                    </div>
+                )}
+                {status === STATIC_STATUS.ENABLED && (
+                    <div className="text-success">
+                        <Trans>
+                            install_static_ok
+                        </Trans>
+                    </div>
+                )}
+            </>
+        );
+    };
+
+    handleAutofix = (type) => {
+        const {
+            webIp,
+            webPort,
+            dnsIp,
+            dnsPort,
+            handleFix,
+        } = this.props;
+
+        const web = {
+            ip: webIp,
+            port: webPort,
+            autofix: false,
+        };
+        const dns = {
+            ip: dnsIp,
+            port: dnsPort,
+            autofix: false,
+        };
+        const set_static_ip = false;
+
+        if (type === 'web') {
+            web.autofix = true;
+        } else {
+            dns.autofix = true;
+        }
+
+        handleFix(web, dns, set_static_ip);
+    };
+
+    handleStaticIp = (ip) => {
+        const {
+            webIp,
+            webPort,
+            dnsIp,
+            dnsPort,
+            handleFix,
+        } = this.props;
+
+        const web = {
+            ip: webIp,
+            port: webPort,
+            autofix: false,
+        };
+        const dns = {
+            ip: dnsIp,
+            port: dnsPort,
+            autofix: false,
+        };
+        const set_static_ip = true;
+
+        if (window.confirm(this.props.t('confirm_static_ip', { ip }))) {
+            handleFix(web, dns, set_static_ip);
+        }
+    };
+
     render() {
         const {
             handleSubmit,
             handleChange,
-            handleAutofix,
             webIp,
             webPort,
             dnsIp,
@@ -91,6 +182,7 @@ class Settings extends Component {
             interfaces,
             invalid,
             config,
+            t,
         } = this.props;
         const {
             status: webStatus,
@@ -100,6 +192,7 @@ class Settings extends Component {
             status: dnsStatus,
             can_autofix: isDnsFixAvailable,
         } = config.dns;
+        const { staticIp } = config;
 
         return (
             <form className="setup__step" onSubmit={handleSubmit}>
@@ -120,7 +213,7 @@ class Settings extends Component {
                                     onChange={handleChange}
                                 >
                                     <option value={ALL_INTERFACES_IP}>
-                                        <Trans>install_settings_all_interfaces</Trans>
+                                        {t('install_settings_all_interfaces')}
                                     </option>
                                     {renderInterfaces(interfaces)}
                                 </Field>
@@ -133,31 +226,30 @@ class Settings extends Component {
                                 </label>
                                 <Field
                                     name="web.port"
-                                    component={renderField}
+                                    component={renderInputField}
                                     type="number"
                                     className="form-control"
                                     placeholder="80"
-                                    validate={[port, required]}
+                                    validate={[validateInstallPort, validateRequiredValue]}
                                     normalize={toNumber}
                                     onChange={handleChange}
                                 />
                             </div>
                         </div>
                         <div className="col-12">
-                            {webStatus &&
-                                <div className="setup__error text-danger">
-                                    {webStatus}
-                                    {isWebFixAvailable &&
-                                        <button
-                                            type="button"
-                                            className="btn btn-secondary btn-sm ml-2"
-                                            onClick={() => handleAutofix('web', webIp, webPort)}
-                                        >
-                                            <Trans>fix</Trans>
-                                        </button>
-                                    }
-                                </div>
-                            }
+                            {webStatus
+                            && <div className="setup__error text-danger">
+                                {webStatus}
+                                {isWebFixAvailable
+                                && <button
+                                    type="button"
+                                    className="btn btn-secondary btn-sm ml-2"
+                                    onClick={() => this.handleAutofix('web')}
+                                >
+                                    <Trans>fix</Trans>
+                                </button>}
+                            </div>}
+                            <hr className="divider--small" />
                         </div>
                     </div>
                     <div className="setup__desc">
@@ -171,6 +263,7 @@ class Settings extends Component {
                         </div>
                     </div>
                 </div>
+
                 <div className="setup__group">
                     <div className="setup__subtitle">
                         <Trans>install_settings_dns</Trans>
@@ -188,7 +281,7 @@ class Settings extends Component {
                                     onChange={handleChange}
                                 >
                                     <option value={ALL_INTERFACES_IP}>
-                                        <Trans>install_settings_all_interfaces</Trans>
+                                        {t('install_settings_all_interfaces')}
                                     </option>
                                     {renderInterfaces(interfaces)}
                                 </Field>
@@ -201,31 +294,51 @@ class Settings extends Component {
                                 </label>
                                 <Field
                                     name="dns.port"
-                                    component={renderField}
+                                    component={renderInputField}
                                     type="number"
                                     className="form-control"
                                     placeholder="80"
-                                    validate={[port, required]}
+                                    validate={[validateInstallPort, validateRequiredValue]}
                                     normalize={toNumber}
                                     onChange={handleChange}
                                 />
                             </div>
                         </div>
                         <div className="col-12">
-                            {dnsStatus &&
+                            {dnsStatus
+                            && <>
                                 <div className="setup__error text-danger">
                                     {dnsStatus}
-                                    {isDnsFixAvailable &&
-                                        <button
-                                            type="button"
-                                            className="btn btn-secondary btn-sm ml-2"
-                                            onClick={() => handleAutofix('dns', dnsIp, dnsPort)}
-                                        >
-                                            <Trans>fix</Trans>
-                                        </button>
+                                    {isDnsFixAvailable
+                                    && <button
+                                        type="button"
+                                        className="btn btn-secondary btn-sm ml-2"
+                                        onClick={() => this.handleAutofix('dns')}
+                                    >
+                                        <Trans>fix</Trans>
+                                    </button>
                                     }
                                 </div>
-                            }
+                                {isDnsFixAvailable
+                                && <div className="text-muted mb-2">
+                                    <p className="mb-1">
+                                        <Trans>autofix_warning_text</Trans>
+                                    </p>
+                                    <Trans components={[<li key="0">text</li>]}>
+                                        autofix_warning_list
+                                    </Trans>
+                                    <p className="mb-1">
+                                        <Trans>autofix_warning_result</Trans>
+                                    </p>
+                                </div>}
+                            </>}
+                            {dnsPort === UBUNTU_SYSTEM_PORT && !isDnsFixAvailable
+                            && dnsStatus.includes(ADDRESS_IN_USE_TEXT)
+                            && <Trans
+                                components={[<a href={PORT_53_FAQ_LINK} key="0">link</a>]}>
+                                port_53_faq_link
+                            </Trans>}
+                            <hr className="divider--small" />
                         </div>
                     </div>
                     <div className="setup__desc">
@@ -240,6 +353,19 @@ class Settings extends Component {
                         </div>
                     </div>
                 </div>
+
+                <div className="setup__group">
+                    <div className="setup__subtitle">
+                        <Trans>static_ip</Trans>
+                    </div>
+
+                    <div className="mb-2">
+                        <Trans>static_ip_desc</Trans>
+                    </div>
+
+                    {this.getStaticIpMessage(staticIp)}
+                </div>
+
                 <Controls invalid={invalid} />
             </form>
         );
@@ -249,7 +375,7 @@ class Settings extends Component {
 Settings.propTypes = {
     handleSubmit: PropTypes.func.isRequired,
     handleChange: PropTypes.func,
-    handleAutofix: PropTypes.func,
+    handleFix: PropTypes.func.isRequired,
     validateForm: PropTypes.func,
     webIp: PropTypes.string.isRequired,
     dnsIp: PropTypes.string.isRequired,
@@ -265,9 +391,10 @@ Settings.propTypes = {
     interfaces: PropTypes.object.isRequired,
     invalid: PropTypes.bool.isRequired,
     initialValues: PropTypes.object,
+    t: PropTypes.func.isRequired,
 };
 
-const selector = formValueSelector('install');
+const selector = formValueSelector(FORM_NAME.INSTALL);
 
 const SettingsForm = connect((state) => {
     const webIp = selector(state, 'web.ip');
@@ -284,9 +411,9 @@ const SettingsForm = connect((state) => {
 })(Settings);
 
 export default flow([
-    withNamespaces(),
+    withTranslation(),
     reduxForm({
-        form: 'install',
+        form: FORM_NAME.INSTALL,
         destroyOnUnmount: false,
         forceUnregisterOnUnmount: true,
     }),

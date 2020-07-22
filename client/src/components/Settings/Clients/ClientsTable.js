@@ -1,15 +1,14 @@
 import React, { Component, Fragment } from 'react';
 import PropTypes from 'prop-types';
-import { Trans, withNamespaces } from 'react-i18next';
+import { Trans, withTranslation } from 'react-i18next';
 import ReactTable from 'react-table';
 
 import { MODAL_TYPE } from '../../../helpers/constants';
-import { normalizeTextarea } from '../../../helpers/helpers';
+import { splitByNewLine } from '../../../helpers/helpers';
 import Card from '../../ui/Card';
 import Modal from './Modal';
-import WrapCell from './WrapCell';
-
-import whoisCell from './whoisCell';
+import CellWrap from '../../ui/CellWrap';
+import LogsSearchLink from '../../ui/LogsSearchLink';
 
 class ClientsTable extends Component {
     handleFormAdd = (values) => {
@@ -27,54 +26,63 @@ class ClientsTable extends Component {
             if (values.blocked_services) {
                 config.blocked_services = Object
                     .keys(values.blocked_services)
-                    .filter(service => values.blocked_services[service]);
+                    .filter((service) => values.blocked_services[service]);
             }
 
             if (values.upstreams && typeof values.upstreams === 'string') {
-                config.upstreams = normalizeTextarea(values.upstreams);
+                config.upstreams = splitByNewLine(values.upstreams);
             } else {
                 config.upstreams = [];
             }
+
+            if (values.tags) {
+                config.tags = values.tags.map((tag) => tag.value);
+            } else {
+                config.tags = [];
+            }
         }
 
-        if (this.props.modalType === MODAL_TYPE.EDIT) {
+        if (this.props.modalType === MODAL_TYPE.EDIT_FILTERS) {
             this.handleFormUpdate(config, this.props.modalClientName);
         } else {
             this.handleFormAdd(config);
         }
     };
 
+    getOptionsWithLabels = (options) => (
+        options.map((option) => ({
+            value: option,
+            label: option,
+        }))
+    );
+
     getClient = (name, clients) => {
-        const client = clients.find(item => name === item.name);
+        const client = clients.find((item) => name === item.name);
 
         if (client) {
-            const { upstreams, whois_info, ...values } = client;
+            const {
+                upstreams, tags, whois_info, ...values
+            } = client;
             return {
                 upstreams: (upstreams && upstreams.join('\n')) || '',
+                tags: (tags && this.getOptionsWithLabels(tags)) || [],
                 ...values,
             };
         }
 
         return {
             ids: [''],
+            tags: [],
             use_global_settings: true,
             use_global_blocked_services: true,
         };
-    };
-
-    getStats = (ip, stats) => {
-        if (stats) {
-            const statsForCurrentIP = stats.find(item => item.name === ip);
-            return statsForCurrentIP && statsForCurrentIP.count;
-        }
-
-        return '';
     };
 
     handleDelete = (data) => {
         // eslint-disable-next-line no-alert
         if (window.confirm(this.props.t('client_confirm_delete', { key: data.name }))) {
             this.props.deleteClient(data);
+            this.props.getStats();
         }
     };
 
@@ -87,9 +95,9 @@ class ClientsTable extends Component {
                 const { value } = row;
 
                 return (
-                    <div className="logs__row logs__row--overflow">
+                    <div className="logs__row o-hidden">
                         <span className="logs__text">
-                            {value.map(address => (
+                            {value.map((address) => (
                                 <div key={address} title={address}>
                                     {address}
                                 </div>
@@ -103,7 +111,7 @@ class ClientsTable extends Component {
             Header: this.props.t('table_name'),
             accessor: 'name',
             minWidth: 120,
-            Cell: WrapCell,
+            Cell: CellWrap,
         },
         {
             Header: this.props.t('settings'),
@@ -117,7 +125,7 @@ class ClientsTable extends Component {
                 );
 
                 return (
-                    <div className="logs__row logs__row--overflow">
+                    <div className="logs__row o-hidden">
                         <div className="logs__text">{title}</div>
                     </div>
                 );
@@ -137,14 +145,14 @@ class ClientsTable extends Component {
                 return (
                     <div className="logs__row logs__row--icons">
                         {value && value.length > 0
-                            ? value.map(service => (
-                                  <svg
-                                      className="service__icon service__icon--table"
-                                      title={service}
-                                      key={service}
-                                  >
-                                      <use xlinkHref={`#service_${service}`} />
-                                  </svg>
+                            ? value.map((service) => (
+                                <svg
+                                    className="service__icon service__icon--table"
+                                    title={service}
+                                    key={service}
+                                >
+                                    <use xlinkHref={`#service_${service}`} />
+                                </svg>
                             ))
                             : '–'}
                     </div>
@@ -163,37 +171,50 @@ class ClientsTable extends Component {
                 );
 
                 return (
-                    <div className="logs__row logs__row--overflow">
+                    <div className="logs__row o-hidden">
                         <div className="logs__text">{title}</div>
                     </div>
                 );
             },
         },
         {
-            Header: this.props.t('whois'),
-            accessor: 'whois_info',
-            minWidth: 200,
-            Cell: whoisCell(this.props.t),
+            Header: this.props.t('tags_title'),
+            accessor: 'tags',
+            minWidth: 140,
+            Cell: (row) => {
+                const { value } = row;
+
+                if (!value || value.length < 1) {
+                    return '–';
+                }
+
+                return (
+                    <div className="logs__row o-hidden">
+                        <span className="logs__text">
+                            {value.map((tag) => (
+                                <div key={tag} title={tag} className="small">
+                                    {tag}
+                                </div>
+                            ))}
+                        </span>
+                    </div>
+                );
+            },
         },
         {
             Header: this.props.t('requests_count'),
-            accessor: 'statistics',
+            id: 'statistics',
+            accessor: (row) => this.props.normalizedTopClients.configured[row.name] || 0,
+            sortMethod: (a, b) => b - a,
             minWidth: 120,
             Cell: (row) => {
-                const clientIP = row.original.ip;
-                const clientStats = clientIP && this.getStats(clientIP, this.props.topClients);
+                const content = CellWrap(row);
 
-                if (clientStats) {
-                    return (
-                        <div className="logs__row">
-                            <div className="logs__text" title={clientStats}>
-                                {clientStats}
-                            </div>
-                        </div>
-                    );
+                if (!row.value) {
+                    return content;
                 }
 
-                return '–';
+                return <LogsSearchLink search={row.original.ids[0]}>{content}</LogsSearchLink>;
             },
         },
         {
@@ -211,11 +232,10 @@ class ClientsTable extends Component {
                         <button
                             type="button"
                             className="btn btn-icon btn-outline-primary btn-sm mr-2"
-                            onClick={() =>
-                                toggleClientModal({
-                                    type: MODAL_TYPE.EDIT,
-                                    name: clientName,
-                                })
+                            onClick={() => toggleClientModal({
+                                type: MODAL_TYPE.EDIT_FILTERS,
+                                name: clientName,
+                            })
                             }
                             disabled={processingUpdating}
                             title={t('edit_table_action')}
@@ -251,9 +271,11 @@ class ClientsTable extends Component {
             toggleClientModal,
             processingAdding,
             processingUpdating,
+            supportedTags,
         } = this.props;
 
         const currentClientData = this.getClient(modalClientName, clients);
+        const tagsOptions = this.getOptionsWithLabels(supportedTags);
 
         return (
             <Card
@@ -265,27 +287,42 @@ class ClientsTable extends Component {
                     <ReactTable
                         data={clients || []}
                         columns={this.columns}
+                        defaultSorted={[
+                            {
+                                id: 'statistics',
+                                asc: true,
+                            },
+                        ]}
                         className="-striped -highlight card-table-overflow"
-                        showPagination={true}
+                        showPagination
                         defaultPageSize={10}
                         minRows={5}
-                        previousText={t('previous_btn')}
-                        nextText={t('next_btn')}
+                        showPageSizeOptions={false}
+                        showPageJump={false}
+                        renderTotalPagesCount={() => false}
+                        previousText={
+                            <svg className="icons icon--24 icon--gray w-100 h-100">
+                                <use xlinkHref="#arrow-left" />
+                            </svg>}
+                        nextText={
+                            <svg className="icons icon--24 icon--gray w-100 h-100">
+                                <use xlinkHref="#arrow-right" />
+                            </svg>}
                         loadingText={t('loading_table_status')}
-                        pageText={t('page_table_footer_text')}
-                        ofText="/"
+                        pageText=''
+                        ofText=''
                         rowsText={t('rows_table_footer_text')}
                         noDataText={t('clients_not_found')}
+                        getPaginationProps={() => ({ className: 'custom-pagination' })}
                     />
                     <button
                         type="button"
                         className="btn btn-success btn-standard mt-3"
-                        onClick={() => toggleClientModal(MODAL_TYPE.ADD)}
+                        onClick={() => toggleClientModal(MODAL_TYPE.ADD_FILTERS)}
                         disabled={processingAdding}
                     >
                         <Trans>client_add</Trans>
                     </button>
-
                     <Modal
                         isModalOpen={isModalOpen}
                         modalType={modalType}
@@ -294,6 +331,7 @@ class ClientsTable extends Component {
                         handleSubmit={this.handleSubmit}
                         processingAdding={processingAdding}
                         processingUpdating={processingUpdating}
+                        tagsOptions={tagsOptions}
                     />
                 </Fragment>
             </Card>
@@ -304,7 +342,7 @@ class ClientsTable extends Component {
 ClientsTable.propTypes = {
     t: PropTypes.func.isRequired,
     clients: PropTypes.array.isRequired,
-    topClients: PropTypes.array.isRequired,
+    normalizedTopClients: PropTypes.object.isRequired,
     toggleClientModal: PropTypes.func.isRequired,
     deleteClient: PropTypes.func.isRequired,
     addClient: PropTypes.func.isRequired,
@@ -315,6 +353,8 @@ ClientsTable.propTypes = {
     processingAdding: PropTypes.bool.isRequired,
     processingDeleting: PropTypes.bool.isRequired,
     processingUpdating: PropTypes.bool.isRequired,
+    getStats: PropTypes.func.isRequired,
+    supportedTags: PropTypes.array.isRequired,
 };
 
-export default withNamespaces()(ClientsTable);
+export default withTranslation()(ClientsTable);

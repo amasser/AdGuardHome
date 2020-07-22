@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/AdguardTeam/dnsproxy/upstream"
+	"github.com/AdguardTeam/golibs/jsonutil"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/AdguardTeam/golibs/utils"
 	"github.com/miekg/dns"
@@ -20,62 +21,218 @@ func httpError(r *http.Request, w http.ResponseWriter, code int, format string, 
 	http.Error(w, text, code)
 }
 
-func (s *Server) handleProtectionEnable(w http.ResponseWriter, r *http.Request) {
-	s.conf.ProtectionEnabled = true
-	s.conf.ConfigModified()
+type dnsConfigJSON struct {
+	Upstreams  []string `json:"upstream_dns"`
+	Bootstraps []string `json:"bootstrap_dns"`
+
+	ProtectionEnabled bool   `json:"protection_enabled"`
+	RateLimit         uint32 `json:"ratelimit"`
+	BlockingMode      string `json:"blocking_mode"`
+	BlockingIPv4      string `json:"blocking_ipv4"`
+	BlockingIPv6      string `json:"blocking_ipv6"`
+	EDNSCSEnabled     bool   `json:"edns_cs_enabled"`
+	DNSSECEnabled     bool   `json:"dnssec_enabled"`
+	DisableIPv6       bool   `json:"disable_ipv6"`
+	UpstreamMode      string `json:"upstream_mode"`
+	CacheSize         uint32 `json:"cache_size"`
+	CacheMinTTL       uint32 `json:"cache_ttl_min"`
+	CacheMaxTTL       uint32 `json:"cache_ttl_max"`
 }
 
-func (s *Server) handleProtectionDisable(w http.ResponseWriter, r *http.Request) {
-	s.conf.ProtectionEnabled = false
+func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
+	resp := dnsConfigJSON{}
+	s.RLock()
+	resp.Upstreams = stringArrayDup(s.conf.UpstreamDNS)
+	resp.Bootstraps = stringArrayDup(s.conf.BootstrapDNS)
+
+	resp.ProtectionEnabled = s.conf.ProtectionEnabled
+	resp.BlockingMode = s.conf.BlockingMode
+	resp.BlockingIPv4 = s.conf.BlockingIPv4
+	resp.BlockingIPv6 = s.conf.BlockingIPv6
+	resp.RateLimit = s.conf.Ratelimit
+	resp.EDNSCSEnabled = s.conf.EnableEDNSClientSubnet
+	resp.DNSSECEnabled = s.conf.EnableDNSSEC
+	resp.DisableIPv6 = s.conf.AAAADisabled
+	resp.CacheSize = s.conf.CacheSize
+	resp.CacheMinTTL = s.conf.CacheMinTTL
+	resp.CacheMaxTTL = s.conf.CacheMaxTTL
+	if s.conf.FastestAddr {
+		resp.UpstreamMode = "fastest_addr"
+	} else if s.conf.AllServers {
+		resp.UpstreamMode = "parallel"
+	}
+	s.RUnlock()
+
+	js, err := json.Marshal(resp)
+	if err != nil {
+		httpError(r, w, http.StatusInternalServerError, "json.Marshal: %s", err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(js)
+}
+
+func checkBlockingMode(req dnsConfigJSON) bool {
+	bm := req.BlockingMode
+	if !(bm == "default" || bm == "nxdomain" || bm == "null_ip" || bm == "custom_ip") {
+		return false
+	}
+
+	if bm == "custom_ip" {
+		ip := net.ParseIP(req.BlockingIPv4)
+		if ip == nil || ip.To4() == nil {
+			return false
+		}
+
+		ip = net.ParseIP(req.BlockingIPv6)
+		if ip == nil {
+			return false
+		}
+	}
+
+	return true
+}
+
+// nolint(gocyclo) - we need to check each JSON field separately
+func (s *Server) handleSetConfig(w http.ResponseWriter, r *http.Request) {
+	req := dnsConfigJSON{}
+	js, err := jsonutil.DecodeObject(&req, r.Body)
+	if err != nil {
+		httpError(r, w, http.StatusBadRequest, "json.Decode: %s", err)
+		return
+	}
+
+	if js.Exists("upstream_dns") {
+		if len(req.Upstreams) != 0 {
+			err = ValidateUpstreams(req.Upstreams)
+			if err != nil {
+				httpError(r, w, http.StatusBadRequest, "wrong upstreams specification: %s", err)
+				return
+			}
+		}
+	}
+
+	if js.Exists("bootstrap_dns") {
+		for _, host := range req.Bootstraps {
+			if err := checkPlainDNS(host); err != nil {
+				httpError(r, w, http.StatusBadRequest, "%s can not be used as bootstrap dns cause: %s", host, err)
+				return
+			}
+		}
+	}
+
+	if js.Exists("blocking_mode") && !checkBlockingMode(req) {
+		httpError(r, w, http.StatusBadRequest, "blocking_mode: incorrect value")
+		return
+	}
+
+	if js.Exists("upstream_mode") &&
+		!(req.UpstreamMode == "" || req.UpstreamMode == "fastest_addr" || req.UpstreamMode == "parallel") {
+		httpError(r, w, http.StatusBadRequest, "upstream_mode: incorrect value")
+		return
+	}
+
+	if req.CacheMinTTL > req.CacheMaxTTL {
+		httpError(r, w, http.StatusBadRequest, "cache_ttl_min must be less or equal than cache_ttl_max")
+		return
+	}
+
+	restart := false
+	s.Lock()
+
+	if js.Exists("upstream_dns") {
+		s.conf.UpstreamDNS = req.Upstreams
+		restart = true
+	}
+
+	if js.Exists("bootstrap_dns") {
+		s.conf.BootstrapDNS = req.Bootstraps
+		restart = true
+	}
+
+	if js.Exists("protection_enabled") {
+		s.conf.ProtectionEnabled = req.ProtectionEnabled
+	}
+
+	if js.Exists("blocking_mode") {
+		s.conf.BlockingMode = req.BlockingMode
+		if req.BlockingMode == "custom_ip" {
+			if js.Exists("blocking_ipv4") {
+				s.conf.BlockingIPv4 = req.BlockingIPv4
+				s.conf.BlockingIPAddrv4 = net.ParseIP(req.BlockingIPv4)
+			}
+			if js.Exists("blocking_ipv6") {
+				s.conf.BlockingIPv6 = req.BlockingIPv6
+				s.conf.BlockingIPAddrv6 = net.ParseIP(req.BlockingIPv6)
+			}
+		}
+	}
+
+	if js.Exists("ratelimit") {
+		if s.conf.Ratelimit != req.RateLimit {
+			restart = true
+		}
+		s.conf.Ratelimit = req.RateLimit
+	}
+
+	if js.Exists("edns_cs_enabled") {
+		s.conf.EnableEDNSClientSubnet = req.EDNSCSEnabled
+		restart = true
+	}
+
+	if js.Exists("dnssec_enabled") {
+		s.conf.EnableDNSSEC = req.DNSSECEnabled
+	}
+
+	if js.Exists("disable_ipv6") {
+		s.conf.AAAADisabled = req.DisableIPv6
+	}
+
+	if js.Exists("cache_size") {
+		s.conf.CacheSize = req.CacheSize
+		restart = true
+	}
+
+	if js.Exists("cache_ttl_min") {
+		s.conf.CacheMinTTL = req.CacheMinTTL
+		restart = true
+	}
+
+	if js.Exists("cache_ttl_max") {
+		s.conf.CacheMaxTTL = req.CacheMaxTTL
+		restart = true
+	}
+
+	if js.Exists("upstream_mode") {
+		s.conf.FastestAddr = false
+		s.conf.AllServers = false
+		switch req.UpstreamMode {
+		case "":
+			//
+
+		case "parallel":
+			s.conf.AllServers = true
+
+		case "fastest_addr":
+			s.conf.FastestAddr = true
+		}
+	}
+
+	s.Unlock()
 	s.conf.ConfigModified()
+
+	if restart {
+		err = s.Reconfigure(nil)
+		if err != nil {
+			httpError(r, w, http.StatusInternalServerError, "%s", err)
+			return
+		}
+	}
 }
 
 type upstreamJSON struct {
 	Upstreams    []string `json:"upstream_dns"`  // Upstreams
 	BootstrapDNS []string `json:"bootstrap_dns"` // Bootstrap DNS
-	AllServers   bool     `json:"all_servers"`   // --all-servers param for dnsproxy
-}
-
-func (s *Server) handleSetUpstreamConfig(w http.ResponseWriter, r *http.Request) {
-	req := upstreamJSON{}
-	err := json.NewDecoder(r.Body).Decode(&req)
-	if err != nil {
-		httpError(r, w, http.StatusBadRequest, "Failed to parse new upstreams config json: %s", err)
-		return
-	}
-
-	err = ValidateUpstreams(req.Upstreams)
-	if err != nil {
-		httpError(r, w, http.StatusBadRequest, "wrong upstreams specification: %s", err)
-		return
-	}
-
-	newconf := FilteringConfig{}
-	newconf.UpstreamDNS = req.Upstreams
-
-	// bootstrap servers are plain DNS only
-	for _, host := range req.BootstrapDNS {
-		if err := checkPlainDNS(host); err != nil {
-			httpError(r, w, http.StatusBadRequest, "%s can not be used as bootstrap dns cause: %s", host, err)
-			return
-		}
-	}
-	newconf.BootstrapDNS = req.BootstrapDNS
-
-	newconf.AllServers = req.AllServers
-
-	s.Lock()
-	s.conf.UpstreamDNS = newconf.UpstreamDNS
-	s.conf.BootstrapDNS = newconf.BootstrapDNS
-	s.conf.AllServers = newconf.AllServers
-	s.Unlock()
-	s.conf.ConfigModified()
-
-	err = s.Restart()
-	if err != nil {
-		httpError(r, w, http.StatusInternalServerError, "%s", err)
-		return
-	}
 }
 
 // ValidateUpstreams validates each upstream and returns an error if any upstream is invalid or if there are no default upstreams specified
@@ -227,8 +384,8 @@ func checkDNS(input string, bootstrap []string) error {
 		return fmt.Errorf("wrong upstream format: %s", err)
 	}
 
-	// No need to check this entrance
-	if input == "#" && !defaultUpstream {
+	// No need to check this DNS server
+	if input == "#" || !defaultUpstream {
 		return nil
 	}
 
@@ -269,13 +426,32 @@ func checkDNS(input string, bootstrap []string) error {
 	return nil
 }
 
+// Control flow:
+// web
+//  -> dnsforward.handleDOH -> dnsforward.ServeHTTP
+//  -> proxy.ServeHTTP -> proxy.handleDNSRequest
+//  -> dnsforward.handleDNSRequest
+func (s *Server) handleDOH(w http.ResponseWriter, r *http.Request) {
+	if !s.conf.TLSAllowUnencryptedDOH && r.TLS == nil {
+		httpError(r, w, http.StatusNotFound, "Not Found")
+		return
+	}
+
+	if !s.IsRunning() {
+		httpError(r, w, http.StatusInternalServerError, "DNS server is not running")
+		return
+	}
+
+	s.ServeHTTP(w, r)
+}
+
 func (s *Server) registerHandlers() {
-	s.conf.HTTPRegister("POST", "/control/enable_protection", s.handleProtectionEnable)
-	s.conf.HTTPRegister("POST", "/control/disable_protection", s.handleProtectionDisable)
-	s.conf.HTTPRegister("POST", "/control/set_upstreams_config", s.handleSetUpstreamConfig)
+	s.conf.HTTPRegister("GET", "/control/dns_info", s.handleGetConfig)
+	s.conf.HTTPRegister("POST", "/control/dns_config", s.handleSetConfig)
 	s.conf.HTTPRegister("POST", "/control/test_upstream_dns", s.handleTestUpstreamDNS)
 
 	s.conf.HTTPRegister("GET", "/control/access/list", s.handleAccessList)
 	s.conf.HTTPRegister("POST", "/control/access/set", s.handleAccessSet)
 
+	s.conf.HTTPRegister("", "/dns-query", s.handleDOH)
 }

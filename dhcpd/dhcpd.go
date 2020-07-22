@@ -18,6 +18,8 @@ import (
 const defaultDiscoverTime = time.Second * 3
 const leaseExpireStatic = 1
 
+var webHandlersRegistered = false
+
 // Lease contains the necessary information about a DHCP lease
 // field ordering is important -- yaml fields will mirror ordering from here
 type Lease struct {
@@ -55,6 +57,16 @@ type ServerConfig struct {
 	HTTPRegister func(string, string, func(http.ResponseWriter, *http.Request)) `json:"-" yaml:"-"`
 }
 
+type onLeaseChangedT func(flags int)
+
+// flags for onLeaseChanged()
+const (
+	LeaseChangedAdded = iota
+	LeaseChangedAddedStatic
+	LeaseChangedRemovedStatic
+	LeaseChangedBlacklisted
+)
+
 // Server - the current state of the DHCP server
 type Server struct {
 	conn *filterConn // listening UDP socket
@@ -78,6 +90,9 @@ type Server struct {
 	IPpool map[[4]byte]net.HardwareAddr
 
 	conf ServerConfig
+
+	// Called when the leases DB is modified
+	onLeaseChanged []onLeaseChangedT
 }
 
 // Print information about the available network interfaces
@@ -100,9 +115,23 @@ func (s *Server) CheckConfig(config ServerConfig) error {
 func Create(config ServerConfig) *Server {
 	s := Server{}
 	s.conf = config
-	if s.conf.HTTPRegister != nil {
+	s.conf.DBFilePath = filepath.Join(config.WorkDir, dbFilename)
+	if s.conf.Enabled {
+		err := s.setConfig(config)
+		if err != nil {
+			log.Error("DHCP: %s", err)
+			return nil
+		}
+	}
+
+	if !webHandlersRegistered && s.conf.HTTPRegister != nil {
+		webHandlersRegistered = true
 		s.registerHandlers()
 	}
+
+	// we can't delay database loading until DHCP server is started,
+	//  because we need static leases functionality available beforehand
+	s.dbLoad()
 	return &s
 }
 
@@ -112,8 +141,21 @@ func (s *Server) Init(config ServerConfig) error {
 	if err != nil {
 		return err
 	}
-	s.dbLoad()
 	return nil
+}
+
+// SetOnLeaseChanged - set callback
+func (s *Server) SetOnLeaseChanged(onLeaseChanged onLeaseChangedT) {
+	s.onLeaseChanged = append(s.onLeaseChanged, onLeaseChanged)
+}
+
+func (s *Server) notify(flags int) {
+	if len(s.onLeaseChanged) == 0 {
+		return
+	}
+	for _, f := range s.onLeaseChanged {
+		f(flags)
+	}
 }
 
 // WriteDiskConfig - write configuration
@@ -178,16 +220,15 @@ func (s *Server) setConfig(config ServerConfig) error {
 	s.conf.WorkDir = oldconf.WorkDir
 	s.conf.HTTPRegister = oldconf.HTTPRegister
 	s.conf.ConfigModified = oldconf.ConfigModified
-	s.conf.DBFilePath = filepath.Join(config.WorkDir, dbFilename)
+	s.conf.DBFilePath = oldconf.DBFilePath
 	return nil
 }
 
 // Start will listen on port 67 and serve DHCP requests.
 func (s *Server) Start() error {
-
 	// TODO: don't close if interface and addresses are the same
 	if s.conn != nil {
-		s.closeConn()
+		_ = s.closeConn()
 	}
 
 	iface, err := net.InterfaceByName(s.conf.InterfaceName)
@@ -211,7 +252,7 @@ func (s *Server) Start() error {
 		if err != nil && !s.stopping {
 			log.Printf("dhcp4.Serve() returned with error: %s", err)
 		}
-		c.Close() // in case Serve() exits for other reason than listening socket closure
+		_ = c.Close() // in case Serve() exits for other reason than listening socket closure
 		s.running = false
 		s.cond.Signal()
 	}()
@@ -281,7 +322,6 @@ func (s *Server) reserveLease(p dhcp4.Packet) (*Lease, error) {
 			s.leases[i].IP, hwaddr, s.leases[i].HWAddr, s.leases[i].Expiry)
 		lease.IP = s.leases[i].IP
 		s.leases[i] = lease
-		s.dbStore()
 
 		s.reserveIP(lease.IP, hwaddr)
 		return lease, nil
@@ -290,7 +330,6 @@ func (s *Server) reserveLease(p dhcp4.Packet) (*Lease, error) {
 	log.Tracef("Assigning to %s IP address %s", hwaddr, ip.String())
 	lease.IP = ip
 	s.leases = append(s.leases, lease)
-	s.dbStore()
 	return lease, nil
 }
 
@@ -445,6 +484,7 @@ func (s *Server) blacklistLease(lease *Lease) {
 	lease.Expiry = time.Now().Add(s.leaseTime)
 	s.dbStore()
 	s.leasesLock.Unlock()
+	s.notify(LeaseChangedBlacklisted)
 }
 
 // Return TRUE if DHCP packet is correct
@@ -534,6 +574,10 @@ func (s *Server) handleDHCP4Request(p dhcp4.Packet, options dhcp4.Options) dhcp4
 
 	if lease.Expiry.Unix() != leaseExpireStatic {
 		lease.Expiry = time.Now().Add(s.leaseTime)
+		s.leasesLock.Lock()
+		s.dbStore()
+		s.leasesLock.Unlock()
+		s.notify(LeaseChangedAdded) // Note: maybe we shouldn't call this function if only expiration time is updated
 	}
 	log.Tracef("Replying with ACK.  IP: %s  HW: %s  Expire: %s",
 		lease.IP, lease.HWAddr, lease.Expiry)
@@ -565,30 +609,34 @@ func (s *Server) handleDecline(p dhcp4.Packet, options dhcp4.Options) dhcp4.Pack
 
 // AddStaticLease adds a static lease (thread-safe)
 func (s *Server) AddStaticLease(l Lease) error {
-	if s.IPpool == nil {
-		return fmt.Errorf("DHCP server isn't started")
-	}
-
 	if len(l.IP) != 4 {
-		return fmt.Errorf("Invalid IP")
+		return fmt.Errorf("invalid IP")
 	}
 	if len(l.HWAddr) != 6 {
-		return fmt.Errorf("Invalid MAC")
+		return fmt.Errorf("invalid MAC")
 	}
 	l.Expiry = time.Unix(leaseExpireStatic, 0)
 
 	s.leasesLock.Lock()
-	defer s.leasesLock.Unlock()
 
 	if s.findReservedHWaddr(l.IP) != nil {
 		err := s.rmDynamicLeaseWithIP(l.IP)
 		if err != nil {
+			s.leasesLock.Unlock()
+			return err
+		}
+	} else {
+		err := s.rmDynamicLeaseWithMAC(l.HWAddr)
+		if err != nil {
+			s.leasesLock.Unlock()
 			return err
 		}
 	}
 	s.leases = append(s.leases, &l)
 	s.reserveIP(l.IP, l.HWAddr)
 	s.dbStore()
+	s.leasesLock.Unlock()
+	s.notify(LeaseChangedAddedStatic)
 	return nil
 }
 
@@ -596,9 +644,9 @@ func (s *Server) AddStaticLease(l Lease) error {
 func (s *Server) rmDynamicLeaseWithIP(ip net.IP) error {
 	var newLeases []*Lease
 	for _, lease := range s.leases {
-		if bytes.Equal(lease.IP.To4(), ip) {
+		if net.IP.Equal(lease.IP.To4(), ip) {
 			if lease.Expiry.Unix() == leaseExpireStatic {
-				return fmt.Errorf("Static lease with the same IP already exists")
+				return fmt.Errorf("static lease with the same IP already exists")
 			}
 			continue
 		}
@@ -609,11 +657,28 @@ func (s *Server) rmDynamicLeaseWithIP(ip net.IP) error {
 	return nil
 }
 
+// Remove a dynamic lease by IP address
+func (s *Server) rmDynamicLeaseWithMAC(mac net.HardwareAddr) error {
+	var newLeases []*Lease
+	for _, lease := range s.leases {
+		if bytes.Equal(lease.HWAddr, mac) {
+			if lease.Expiry.Unix() == leaseExpireStatic {
+				return fmt.Errorf("static lease with the same IP already exists")
+			}
+			s.unreserveIP(lease.IP)
+			continue
+		}
+		newLeases = append(newLeases, lease)
+	}
+	s.leases = newLeases
+	return nil
+}
+
 // Remove a lease
 func (s *Server) rmLease(l Lease) error {
 	var newLeases []*Lease
 	for _, lease := range s.leases {
-		if bytes.Equal(lease.IP.To4(), l.IP) {
+		if net.IP.Equal(lease.IP.To4(), l.IP) {
 			if !bytes.Equal(lease.HWAddr, l.HWAddr) ||
 				lease.Hostname != l.Hostname {
 				return fmt.Errorf("Lease not found")
@@ -629,62 +694,51 @@ func (s *Server) rmLease(l Lease) error {
 
 // RemoveStaticLease removes a static lease (thread-safe)
 func (s *Server) RemoveStaticLease(l Lease) error {
-	if s.IPpool == nil {
-		return fmt.Errorf("DHCP server isn't started")
-	}
-
 	if len(l.IP) != 4 {
-		return fmt.Errorf("Invalid IP")
+		return fmt.Errorf("invalid IP")
 	}
 	if len(l.HWAddr) != 6 {
-		return fmt.Errorf("Invalid MAC")
+		return fmt.Errorf("invalid MAC")
 	}
 
 	s.leasesLock.Lock()
-	defer s.leasesLock.Unlock()
 
 	if s.findReservedHWaddr(l.IP) == nil {
-		return fmt.Errorf("Lease not found")
+		s.leasesLock.Unlock()
+		return fmt.Errorf("lease not found")
 	}
 
 	err := s.rmLease(l)
 	if err != nil {
+		s.leasesLock.Unlock()
 		return err
 	}
 	s.dbStore()
+	s.leasesLock.Unlock()
+	s.notify(LeaseChangedRemovedStatic)
 	return nil
 }
 
+// flags for Leases() function
+const (
+	LeasesDynamic = 1
+	LeasesStatic  = 2
+	LeasesAll     = LeasesDynamic | LeasesStatic
+)
+
 // Leases returns the list of current DHCP leases (thread-safe)
-func (s *Server) Leases() []Lease {
+func (s *Server) Leases(flags int) []Lease {
 	var result []Lease
 	now := time.Now().Unix()
 	s.leasesLock.RLock()
 	for _, lease := range s.leases {
-		if lease.Expiry.Unix() > now {
+		if ((flags&LeasesDynamic) != 0 && lease.Expiry.Unix() > now) ||
+			((flags&LeasesStatic) != 0 && lease.Expiry.Unix() == leaseExpireStatic) {
 			result = append(result, *lease)
 		}
 	}
 	s.leasesLock.RUnlock()
 
-	return result
-}
-
-// StaticLeases returns the list of statically-configured DHCP leases (thread-safe)
-func (s *Server) StaticLeases() []Lease {
-	s.leasesLock.Lock()
-	defer s.leasesLock.Unlock()
-
-	if s.IPpool == nil {
-		s.dbLoad()
-	}
-
-	var result []Lease
-	for _, lease := range s.leases {
-		if lease.Expiry.Unix() == 1 {
-			result = append(result, *lease)
-		}
-	}
 	return result
 }
 
@@ -717,9 +771,17 @@ func (s *Server) FindMACbyIP(ip net.IP) net.HardwareAddr {
 	s.leasesLock.RLock()
 	defer s.leasesLock.RUnlock()
 
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return nil
+	}
+
 	for _, l := range s.leases {
-		if l.Expiry.Unix() > now && l.IP.Equal(ip) {
-			return l.HWAddr
+		if l.IP.Equal(ip4) {
+			unix := l.Expiry.Unix()
+			if unix > now || unix == leaseExpireStatic {
+				return l.HWAddr
+			}
 		}
 	}
 	return nil

@@ -10,10 +10,12 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
+	"sort"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/AdguardTeam/AdGuardHome/dhcpd"
 	"github.com/AdguardTeam/AdGuardHome/dnsfilter"
 	"github.com/AdguardTeam/dnsproxy/proxy"
 	"github.com/AdguardTeam/dnsproxy/upstream"
@@ -28,7 +30,7 @@ const (
 
 func TestServer(t *testing.T) {
 	s := createTestServer(t)
-	err := s.Start(nil)
+	err := s.Start()
 	if err != nil {
 		t.Fatalf("Failed to start server: %s", err)
 	}
@@ -62,7 +64,7 @@ func TestServer(t *testing.T) {
 func TestServerWithProtectionDisabled(t *testing.T) {
 	s := createTestServer(t)
 	s.conf.ProtectionEnabled = false
-	err := s.Start(nil)
+	err := s.Start()
 	if err != nil {
 		t.Fatalf("Failed to start server: %s", err)
 	}
@@ -94,8 +96,9 @@ func TestDotServer(t *testing.T) {
 		PrivateKeyData:       keyPem,
 	}
 
+	_ = s.Prepare(nil)
 	// Starting the server
-	err := s.Start(nil)
+	err := s.Start()
 	if err != nil {
 		t.Fatalf("Failed to start server: %s", err)
 	}
@@ -127,7 +130,7 @@ func TestDotServer(t *testing.T) {
 
 func TestServerRace(t *testing.T) {
 	s := createTestServer(t)
-	err := s.Start(nil)
+	err := s.Start()
 	if err != nil {
 		t.Fatalf("Failed to start server: %s", err)
 	}
@@ -150,7 +153,7 @@ func TestServerRace(t *testing.T) {
 
 func TestSafeSearch(t *testing.T) {
 	s := createTestServer(t)
-	err := s.Start(nil)
+	err := s.Start()
 	if err != nil {
 		t.Fatalf("Failed to start server: %s", err)
 	}
@@ -191,7 +194,7 @@ func TestSafeSearch(t *testing.T) {
 
 func TestInvalidRequest(t *testing.T) {
 	s := createTestServer(t)
-	err := s.Start(nil)
+	err := s.Start()
 	if err != nil {
 		t.Fatalf("Failed to start server: %s", err)
 	}
@@ -217,7 +220,7 @@ func TestInvalidRequest(t *testing.T) {
 
 func TestBlockedRequest(t *testing.T) {
 	s := createTestServer(t)
-	err := s.Start(nil)
+	err := s.Start()
 	if err != nil {
 		t.Fatalf("Failed to start server: %s", err)
 	}
@@ -245,6 +248,39 @@ func TestBlockedRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DNS server failed to stop: %s", err)
 	}
+}
+
+func TestServerCustomClientUpstream(t *testing.T) {
+	s := createTestServer(t)
+	err := s.Start()
+	if err != nil {
+		t.Fatalf("Failed to start server: %s", err)
+	}
+	s.conf.GetCustomUpstreamByClient = func(clientAddr string) *proxy.UpstreamConfig {
+		uc := &proxy.UpstreamConfig{}
+		u := &testUpstream{}
+		u.ipv4 = map[string][]net.IP{}
+		u.ipv4["host."] = []net.IP{net.ParseIP("192.168.0.1")}
+		uc.Upstreams = append(uc.Upstreams, u)
+		return uc
+	}
+	addr := s.dnsProxy.Addr(proxy.ProtoUDP)
+
+	// Send test request
+	req := dns.Msg{}
+	req.Id = dns.Id()
+	req.RecursionDesired = true
+	req.Question = []dns.Question{
+		{Name: "host.", Qtype: dns.TypeA, Qclass: dns.ClassINET},
+	}
+
+	reply, err := dns.Exchange(&req, addr.String())
+
+	assert.Nil(t, err)
+	assert.Equal(t, dns.RcodeSuccess, reply.Rcode)
+	assert.NotNil(t, reply.Answer)
+	assert.Equal(t, "192.168.0.1", reply.Answer[0].(*dns.A).A.String())
+	assert.Nil(t, s.Stop())
 }
 
 // testUpstream is a mock of real upstream.
@@ -319,11 +355,13 @@ func (u *testUpstream) Address() string {
 func (s *Server) startWithUpstream(u upstream.Upstream) error {
 	s.Lock()
 	defer s.Unlock()
-	err := s.prepare(nil)
+	err := s.Prepare(nil)
 	if err != nil {
 		return err
 	}
-	s.dnsProxy.Upstreams = []upstream.Upstream{u}
+	s.dnsProxy.UpstreamConfig = &proxy.UpstreamConfig{
+		Upstreams: []upstream.Upstream{u},
+	}
 	return s.dnsProxy.Start()
 }
 
@@ -339,6 +377,22 @@ var testIPv4 = map[string][]net.IP{
 	"example.org.":      {{127, 0, 0, 255}},
 }
 
+func TestBlockCNAMEProtectionEnabled(t *testing.T) {
+	s := createTestServer(t)
+	testUpstm := &testUpstream{testCNAMEs, testIPv4, nil}
+	s.conf.ProtectionEnabled = false
+	err := s.startWithUpstream(testUpstm)
+	assert.True(t, err == nil)
+	addr := s.dnsProxy.Addr(proxy.ProtoUDP)
+
+	// 'badhost' has a canonical name 'null.example.org' which is blocked by filters:
+	// but protection is disabled - response is NOT blocked
+	req := createTestMessage("badhost.")
+	reply, err := dns.Exchange(req, addr.String())
+	assert.Nil(t, err)
+	assert.Equal(t, dns.RcodeSuccess, reply.Rcode)
+}
+
 func TestBlockCNAME(t *testing.T) {
 	s := createTestServer(t)
 	testUpstm := &testUpstream{testCNAMEs, testIPv4, nil}
@@ -348,45 +402,57 @@ func TestBlockCNAME(t *testing.T) {
 
 	// 'badhost' has a canonical name 'null.example.org' which is blocked by filters:
 	// response is blocked
+	req := createTestMessage("badhost.")
+	reply, err := dns.Exchange(req, addr.String())
+	assert.Nil(t, err, nil)
+	assert.Equal(t, dns.RcodeNameError, reply.Rcode)
+
+	// 'whitelist.example.org' has a canonical name 'null.example.org' which is blocked by filters
+	//   but 'whitelist.example.org' is in a whitelist:
+	// response isn't blocked
+	req = createTestMessage("whitelist.example.org.")
+	reply, err = dns.Exchange(req, addr.String())
+	assert.Nil(t, err)
+	assert.Equal(t, dns.RcodeSuccess, reply.Rcode)
+
+	// 'example.org' has a canonical name 'cname1' with IP 127.0.0.255 which is blocked by filters:
+	// response is blocked
+	req = createTestMessage("example.org.")
+	reply, err = dns.Exchange(req, addr.String())
+	assert.Nil(t, err)
+	assert.Equal(t, dns.RcodeNameError, reply.Rcode)
+
+	_ = s.Stop()
+}
+
+func TestClientRulesForCNAMEMatching(t *testing.T) {
+	s := createTestServer(t)
+	testUpstm := &testUpstream{testCNAMEs, testIPv4, nil}
+	s.conf.FilterHandler = func(clientAddr string, settings *dnsfilter.RequestFilteringSettings) {
+		settings.FilteringEnabled = false
+	}
+	err := s.startWithUpstream(testUpstm)
+	assert.Nil(t, err)
+	addr := s.dnsProxy.Addr(proxy.ProtoUDP)
+
+	// 'badhost' has a canonical name 'null.example.org' which is blocked by filters:
+	// response is blocked
 	req := dns.Msg{}
 	req.Id = dns.Id()
 	req.Question = []dns.Question{
 		{Name: "badhost.", Qtype: dns.TypeA, Qclass: dns.ClassINET},
 	}
+	// However, in our case it should not be blocked
+	// as filtering is disabled on the client level
 	reply, err := dns.Exchange(&req, addr.String())
-	assert.True(t, err == nil)
-	assert.True(t, reply.Rcode == dns.RcodeNameError)
-
-	// 'whitelist.example.org' has a canonical name 'null.example.org' which is blocked by filters
-	//   but 'whitelist.example.org' is in a whitelist:
-	// response isn't blocked
-	req = dns.Msg{}
-	req.Id = dns.Id()
-	req.Question = []dns.Question{
-		{Name: "whitelist.example.org.", Qtype: dns.TypeA, Qclass: dns.ClassINET},
-	}
-	reply, err = dns.Exchange(&req, addr.String())
-	assert.True(t, err == nil)
-	assert.True(t, reply.Rcode == dns.RcodeSuccess)
-
-	// 'example.org' has a canonical name 'cname1' with IP 127.0.0.255 which is blocked by filters:
-	// response is blocked
-	req = dns.Msg{}
-	req.Id = dns.Id()
-	req.Question = []dns.Question{
-		{Name: "example.org.", Qtype: dns.TypeA, Qclass: dns.ClassINET},
-	}
-	reply, err = dns.Exchange(&req, addr.String())
-	assert.True(t, err == nil)
-	assert.True(t, reply.Rcode == dns.RcodeNameError)
-
-	_ = s.Stop()
+	assert.Nil(t, err)
+	assert.Equal(t, dns.RcodeSuccess, reply.Rcode)
 }
 
 func TestNullBlockedRequest(t *testing.T) {
 	s := createTestServer(t)
 	s.conf.FilteringConfig.BlockingMode = "null_ip"
-	err := s.Start(nil)
+	err := s.Start()
 	if err != nil {
 		t.Fatalf("Failed to start server: %s", err)
 	}
@@ -423,9 +489,59 @@ func TestNullBlockedRequest(t *testing.T) {
 	}
 }
 
+func TestBlockedCustomIP(t *testing.T) {
+	rules := "||nxdomain.example.org^\n||null.example.org^\n127.0.0.1	host.example.org\n@@||whitelist.example.org^\n||127.0.0.255\n"
+	filters := []dnsfilter.Filter{{
+		ID: 0, Data: []byte(rules),
+	}}
+	c := dnsfilter.Config{}
+
+	f := dnsfilter.New(&c, filters)
+	s := NewServer(DNSCreateParams{DNSFilter: f})
+	conf := ServerConfig{}
+	conf.UDPListenAddr = &net.UDPAddr{Port: 0}
+	conf.TCPListenAddr = &net.TCPAddr{Port: 0}
+	conf.ProtectionEnabled = true
+	conf.BlockingMode = "custom_ip"
+	conf.BlockingIPv4 = "bad IP"
+	conf.UpstreamDNS = []string{"8.8.8.8:53", "8.8.4.4:53"}
+	err := s.Prepare(&conf)
+	assert.True(t, err != nil) // invalid BlockingIPv4
+
+	conf.BlockingIPv4 = "0.0.0.1"
+	conf.BlockingIPv6 = "::1"
+	err = s.Prepare(&conf)
+	assert.Nil(t, err)
+	err = s.Start()
+	assert.Nil(t, err)
+
+	addr := s.dnsProxy.Addr(proxy.ProtoUDP)
+
+	req := createTestMessageWithType("null.example.org.", dns.TypeA)
+	reply, err := dns.Exchange(req, addr.String())
+	assert.Nil(t, err)
+	assert.Equal(t, 1, len(reply.Answer))
+	a, ok := reply.Answer[0].(*dns.A)
+	assert.True(t, ok)
+	assert.Equal(t, "0.0.0.1", a.A.String())
+
+	req = createTestMessageWithType("null.example.org.", dns.TypeAAAA)
+	reply, err = dns.Exchange(req, addr.String())
+	assert.Nil(t, err)
+	assert.Equal(t, 1, len(reply.Answer))
+	a6, ok := reply.Answer[0].(*dns.AAAA)
+	assert.True(t, ok)
+	assert.Equal(t, "::1", a6.AAAA.String())
+
+	err = s.Stop()
+	if err != nil {
+		t.Fatalf("DNS server failed to stop: %s", err)
+	}
+}
+
 func TestBlockedByHosts(t *testing.T) {
 	s := createTestServer(t)
-	err := s.Start(nil)
+	err := s.Start()
 	if err != nil {
 		t.Fatalf("Failed to start server: %s", err)
 	}
@@ -464,7 +580,7 @@ func TestBlockedByHosts(t *testing.T) {
 
 func TestBlockedBySafeBrowsing(t *testing.T) {
 	s := createTestServer(t)
-	err := s.Start(nil)
+	err := s.Start()
 	if err != nil {
 		t.Fatalf("Failed to start server: %s", err)
 	}
@@ -512,10 +628,75 @@ func TestBlockedBySafeBrowsing(t *testing.T) {
 	}
 }
 
+func TestRewrite(t *testing.T) {
+	c := dnsfilter.Config{}
+	c.Rewrites = []dnsfilter.RewriteEntry{
+		dnsfilter.RewriteEntry{
+			Domain: "test.com",
+			Answer: "1.2.3.4",
+			Type:   dns.TypeA,
+		},
+		dnsfilter.RewriteEntry{
+			Domain: "alias.test.com",
+			Answer: "test.com",
+			Type:   dns.TypeCNAME,
+		},
+		dnsfilter.RewriteEntry{
+			Domain: "my.alias.example.org",
+			Answer: "example.org",
+			Type:   dns.TypeCNAME,
+		},
+	}
+
+	f := dnsfilter.New(&c, nil)
+	s := NewServer(DNSCreateParams{DNSFilter: f})
+	conf := ServerConfig{}
+	conf.UDPListenAddr = &net.UDPAddr{Port: 0}
+	conf.TCPListenAddr = &net.TCPAddr{Port: 0}
+	conf.ProtectionEnabled = true
+	conf.UpstreamDNS = []string{"8.8.8.8:53"}
+
+	err := s.Prepare(&conf)
+	assert.Nil(t, err)
+	err = s.Start()
+	assert.Nil(t, err)
+	addr := s.dnsProxy.Addr(proxy.ProtoUDP)
+
+	req := createTestMessageWithType("test.com.", dns.TypeA)
+	reply, err := dns.Exchange(req, addr.String())
+	assert.Nil(t, err)
+	assert.Equal(t, 1, len(reply.Answer))
+	a, ok := reply.Answer[0].(*dns.A)
+	assert.True(t, ok)
+	assert.Equal(t, "1.2.3.4", a.A.String())
+
+	req = createTestMessageWithType("alias.test.com.", dns.TypeA)
+	reply, err = dns.Exchange(req, addr.String())
+	assert.Nil(t, err)
+	assert.Equal(t, 2, len(reply.Answer))
+	assert.Equal(t, "test.com.", reply.Answer[0].(*dns.CNAME).Target)
+	assert.Equal(t, "1.2.3.4", reply.Answer[1].(*dns.A).A.String())
+
+	req = createTestMessageWithType("my.alias.example.org.", dns.TypeA)
+	reply, err = dns.Exchange(req, addr.String())
+	assert.Nil(t, err)
+	assert.Equal(t, "my.alias.example.org.", reply.Question[0].Name) // the original question is restored
+	assert.Equal(t, 2, len(reply.Answer))
+	assert.Equal(t, "example.org.", reply.Answer[0].(*dns.CNAME).Target)
+	assert.Equal(t, dns.TypeA, reply.Answer[1].Header().Rrtype)
+
+	_ = s.Stop()
+}
+
 func createTestServer(t *testing.T) *Server {
-	rules := "||nxdomain.example.org^\n||null.example.org^\n127.0.0.1	host.example.org\n@@||whitelist.example.org^\n||127.0.0.255\n"
-	filters := map[int]string{}
-	filters[0] = rules
+	rules := `||nxdomain.example.org
+||null.example.org^
+127.0.0.1	host.example.org
+@@||whitelist.example.org^
+||127.0.0.255`
+	filters := []dnsfilter.Filter{{
+		ID: 0, Data: []byte(rules),
+	}}
 	c := dnsfilter.Config{}
 	c.SafeBrowsingEnabled = true
 	c.SafeBrowsingCacheSize = 1000
@@ -525,11 +706,13 @@ func createTestServer(t *testing.T) *Server {
 	c.CacheTime = 30
 
 	f := dnsfilter.New(&c, filters)
-	s := NewServer(f, nil, nil)
+	s := NewServer(DNSCreateParams{DNSFilter: f})
 	s.conf.UDPListenAddr = &net.UDPAddr{Port: 0}
 	s.conf.TCPListenAddr = &net.TCPAddr{Port: 0}
 	s.conf.UpstreamDNS = []string{"8.8.8.8:53", "8.8.4.4:53"}
 	s.conf.FilteringConfig.ProtectionEnabled = true
+	err := s.Prepare(nil)
+	assert.True(t, err == nil)
 	return s
 }
 
@@ -649,6 +832,16 @@ func createTestMessage(host string) *dns.Msg {
 	return &req
 }
 
+func createTestMessageWithType(host string, qtype uint16) *dns.Msg {
+	req := dns.Msg{}
+	req.Id = dns.Id()
+	req.RecursionDesired = true
+	req.Question = []dns.Question{
+		{Name: host, Qtype: qtype, Qclass: dns.ClassINET},
+	}
+	return &req
+}
+
 func assertGoogleAResponse(t *testing.T, reply *dns.Msg) {
 	assertResponse(t, reply, "8.8.8.8")
 }
@@ -699,11 +892,26 @@ func TestIsBlockedIPDisallowed(t *testing.T) {
 
 func TestIsBlockedIPBlockedDomain(t *testing.T) {
 	a := &accessCtx{}
-	assert.True(t, a.Init(nil, nil, []string{"host1", "host2"}) == nil)
+	assert.True(t, a.Init(nil, nil, []string{"host1",
+		"host2",
+		"*.host.com",
+		"||host3.com^",
+	}) == nil)
 
+	// match by "host2.com"
 	assert.True(t, a.IsBlockedDomain("host1"))
 	assert.True(t, a.IsBlockedDomain("host2"))
 	assert.True(t, !a.IsBlockedDomain("host3"))
+
+	// match by wildcard "*.host.com"
+	assert.True(t, !a.IsBlockedDomain("host.com"))
+	assert.True(t, a.IsBlockedDomain("asdf.host.com"))
+	assert.True(t, a.IsBlockedDomain("qwer.asdf.host.com"))
+	assert.True(t, !a.IsBlockedDomain("asdf.zhost.com"))
+
+	// match by wildcard "||host3.com^"
+	assert.True(t, a.IsBlockedDomain("host3.com"))
+	assert.True(t, a.IsBlockedDomain("asdf.host3.com"))
 }
 
 func TestValidateUpstream(t *testing.T) {
@@ -780,4 +988,64 @@ func TestValidateUpstreamsSet(t *testing.T) {
 	if err == nil {
 		t.Fatalf("there is an invalid upstream in set, but it pass through validation")
 	}
+}
+
+func TestIpFromAddr(t *testing.T) {
+	addr := net.UDPAddr{}
+	addr.IP = net.ParseIP("1:2:3::4")
+	addr.Port = 12345
+	addr.Zone = "eth0"
+	a := ipFromAddr(&addr)
+	assert.True(t, a == "1:2:3::4")
+
+	a = ipFromAddr(nil)
+	assert.True(t, a == "")
+}
+
+func TestMatchDNSName(t *testing.T) {
+	dnsNames := []string{"host1", "*.host2", "1.2.3.4"}
+	sort.Strings(dnsNames)
+	assert.True(t, matchDNSName(dnsNames, "host1"))
+	assert.True(t, matchDNSName(dnsNames, "a.host2"))
+	assert.True(t, matchDNSName(dnsNames, "b.a.host2"))
+	assert.True(t, matchDNSName(dnsNames, "1.2.3.4"))
+	assert.True(t, !matchDNSName(dnsNames, "host2"))
+	assert.True(t, !matchDNSName(dnsNames, ""))
+	assert.True(t, !matchDNSName(dnsNames, "*.host2"))
+}
+
+func TestPTRResponse(t *testing.T) {
+	dhcp := &dhcpd.Server{}
+	dhcp.IPpool = make(map[[4]byte]net.HardwareAddr)
+
+	c := dnsfilter.Config{}
+	f := dnsfilter.New(&c, nil)
+	s := NewServer(DNSCreateParams{DNSFilter: f, DHCPServer: dhcp})
+	s.conf.UDPListenAddr = &net.UDPAddr{Port: 0}
+	s.conf.TCPListenAddr = &net.TCPAddr{Port: 0}
+	s.conf.UpstreamDNS = []string{"127.0.0.1:53"}
+	s.conf.FilteringConfig.ProtectionEnabled = true
+	err := s.Prepare(nil)
+	assert.True(t, err == nil)
+	assert.Nil(t, s.Start())
+
+	l := dhcpd.Lease{}
+	l.IP = net.ParseIP("127.0.0.1").To4()
+	l.HWAddr, _ = net.ParseMAC("aa:aa:aa:aa:aa:aa")
+	l.Hostname = "localhost"
+	dhcp.AddStaticLease(l)
+
+	addr := s.dnsProxy.Addr(proxy.ProtoUDP)
+	req := createTestMessage("1.0.0.127.in-addr.arpa.")
+	req.Question[0].Qtype = dns.TypePTR
+
+	resp, err := dns.Exchange(req, addr.String())
+	assert.Nil(t, err)
+	assert.Equal(t, 1, len(resp.Answer))
+	assert.Equal(t, dns.TypePTR, resp.Answer[0].Header().Rrtype)
+	assert.Equal(t, "1.0.0.127.in-addr.arpa.", resp.Answer[0].Header().Name)
+	ptr := resp.Answer[0].(*dns.PTR)
+	assert.Equal(t, "localhost.", ptr.Ptr)
+
+	s.Close()
 }

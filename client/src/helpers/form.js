@@ -1,33 +1,59 @@
 import React, { Fragment } from 'react';
-import { Trans } from 'react-i18next';
+import PropTypes from 'prop-types';
+import { createOnBlurHandler } from './helpers';
+import { R_UNIX_ABSOLUTE_PATH, R_WIN_ABSOLUTE_PATH } from './constants';
 
-import { R_IPV4, R_MAC, R_HOST, R_IPV6, UNSAFE_PORTS } from '../helpers/constants';
+export const renderField = (props, elementType) => {
+    const {
+        input, id, className, placeholder, type, disabled, normalizeOnBlur,
+        autoComplete, meta: { touched, error }, min, max, step,
+    } = props;
 
-export const renderField = ({
-    input,
-    id,
-    className,
-    placeholder,
-    type,
-    disabled,
-    autoComplete,
-    meta: { touched, error },
-}) => (
-    <Fragment>
-        <input
-            {...input}
-            id={id}
-            placeholder={placeholder}
-            type={type}
-            className={className}
-            disabled={disabled}
-            autoComplete={autoComplete}
-        />
-        {!disabled &&
-            touched &&
-            (error && <span className="form__message form__message--error">{error}</span>)}
-    </Fragment>
-);
+    const onBlur = (event) => createOnBlurHandler(event, input, normalizeOnBlur);
+
+    const element = React.createElement(elementType, {
+        ...input,
+        id,
+        className,
+        placeholder,
+        autoComplete,
+        disabled,
+        type,
+        min,
+        max,
+        step,
+        onBlur,
+    });
+    return (
+        <>
+            {element}
+            {!disabled && touched && error
+            && <span className="form__message form__message--error">{error}</span>}
+        </>
+    );
+};
+
+renderField.propTypes = {
+    id: PropTypes.string.isRequired,
+    input: PropTypes.object.isRequired,
+    className: PropTypes.string,
+    placeholder: PropTypes.string,
+    type: PropTypes.string,
+    disabled: PropTypes.bool,
+    autoComplete: PropTypes.bool,
+    normalizeOnBlur: PropTypes.func,
+    min: PropTypes.number,
+    max: PropTypes.number,
+    step: PropTypes.number,
+    meta: PropTypes.shape({
+        touched: PropTypes.bool,
+        error: PropTypes.object,
+    }).isRequired,
+};
+
+export const renderTextareaField = (props) => renderField(props, 'textarea');
+
+export const renderInputField = (props) => renderField(props, 'input');
 
 export const renderGroupField = ({
     input,
@@ -40,82 +66,134 @@ export const renderGroupField = ({
     isActionAvailable,
     removeField,
     meta: { touched, error },
-}) => (
-    <Fragment>
-        <div className="input-group">
-            <input
-                {...input}
-                id={id}
-                placeholder={placeholder}
-                type={type}
-                className={className}
-                disabled={disabled}
-                autoComplete={autoComplete}
-            />
-            {isActionAvailable &&
-                <span className="input-group-append">
-                    <button
-                        type="button"
-                        className="btn btn-secondary btn-icon"
-                        onClick={removeField}
-                    >
-                        <svg className="icon icon--close">
-                            <use xlinkHref="#cross" />
-                        </svg>
-                    </button>
-                </span>
-            }
-        </div>
+    normalizeOnBlur,
+}) => {
+    const onBlur = (event) => createOnBlurHandler(event, input, normalizeOnBlur);
 
-        {!disabled &&
-            touched &&
-            (error && <span className="form__message form__message--error">{error}</span>)}
-    </Fragment>
-);
+    return (
+        <Fragment>
+            <div className="input-group">
+                <input
+                    {...input}
+                    id={id}
+                    placeholder={placeholder}
+                    type={type}
+                    className={className}
+                    disabled={disabled}
+                    autoComplete={autoComplete}
+                    onBlur={onBlur}
+                />
+                {isActionAvailable
+                && <span className="input-group-append">
+                        <button
+                            type="button"
+                            className="btn btn-secondary btn-icon btn-icon--green"
+                            onClick={removeField}
+                        >
+                            <svg className="icon icon--24">
+                                <use xlinkHref="#cross" />
+                            </svg>
+                        </button>
+                    </span>
+                }
+            </div>
+            {!disabled && touched && error
+            && <span className="form__message form__message--error">{error}</span>}
+        </Fragment>
+    );
+};
+
+renderGroupField.propTypes = {
+    input: PropTypes.object.isRequired,
+    id: PropTypes.string,
+    className: PropTypes.string,
+    placeholder: PropTypes.string,
+    type: PropTypes.string,
+    disabled: PropTypes.bool,
+    autoComplete: PropTypes.bool,
+    isActionAvailable: PropTypes.bool,
+    removeField: PropTypes.func,
+    meta: PropTypes.shape({
+        touched: PropTypes.bool,
+        error: PropTypes.object,
+    }).isRequired,
+    normalizeOnBlur: PropTypes.func,
+};
 
 export const renderRadioField = ({
-    input, placeholder, disabled, meta: { touched, error },
-}) => (
-    <Fragment>
-        <label className="custom-control custom-radio custom-control-inline">
-            <input {...input} type="radio" className="custom-control-input" disabled={disabled} />
-            <span className="custom-control-label">{placeholder}</span>
-        </label>
-        {!disabled &&
-            touched &&
-            (error && <span className="form__message form__message--error">{error}</span>)}
-    </Fragment>
-);
+    input,
+    placeholder,
+    subtitle,
+    disabled,
+    meta: { touched, error },
+}) => <Fragment>
+    <label className="custom-control custom-radio">
+        <input {...input} type="radio" className="custom-control-input" disabled={disabled} />
+        <span className="custom-control-label">{placeholder}</span>
+        {subtitle && <span
+            className="checkbox__label-subtitle"
+            dangerouslySetInnerHTML={{ __html: subtitle }}
+        />}
+    </label>
+    {!disabled
+    && touched
+    && (error && <span className="form__message form__message--error">{error}</span>)}
+</Fragment>;
+
+renderRadioField.propTypes = {
+    input: PropTypes.object.isRequired,
+    placeholder: PropTypes.string,
+    subtitle: PropTypes.string,
+    disabled: PropTypes.bool,
+    meta: PropTypes.shape({
+        touched: PropTypes.bool,
+        error: PropTypes.object,
+    }).isRequired,
+};
 
 export const renderSelectField = ({
     input,
     placeholder,
     subtitle,
     disabled,
+    onClick,
     modifier = 'checkbox--form',
+    checked,
     meta: { touched, error },
-}) => (
-    <Fragment>
-        <label className={`checkbox ${modifier}`}>
-            <span className="checkbox__marker" />
-            <input {...input} type="checkbox" className="checkbox__input" disabled={disabled} />
-            <span className="checkbox__label">
-                <span className="checkbox__label-text checkbox__label-text--long">
-                    <span className="checkbox__label-title">{placeholder}</span>
-                    {subtitle && (
-                        <span
-                            className="checkbox__label-subtitle"
-                            dangerouslySetInnerHTML={{ __html: subtitle }}
-                        />
-                    )}
-                </span>
-            </span>
-        </label>
-        {!disabled &&
-            touched &&
-            (error && <span className="form__message form__message--error">{error}</span>)}
-    </Fragment>
-);
+}) => <>
+    <label className={`checkbox ${modifier}`} onClick={onClick}>
+        <span className="checkbox__marker" />
+        <input {...input} type="checkbox" className="checkbox__input" disabled={disabled} checked={input.checked || checked}/>
+        <span className="checkbox__label">
+                        <span className="checkbox__label-text checkbox__label-text--long">
+                            <span className="checkbox__label-title">{placeholder}</span>
+                            {subtitle
+                            && <span
+                                className="checkbox__label-subtitle"
+                                dangerouslySetInnerHTML={{ __html: subtitle }}
+
+                            />}
+                        </span>
+                    </span>
+    </label>
+    {!disabled
+    && touched
+    && error && <span className="form__message form__message--error">{error}</span>}
+</>;
+
+renderSelectField.propTypes = {
+    input: PropTypes.object.isRequired,
+    placeholder: PropTypes.string,
+    subtitle: PropTypes.string,
+    disabled: PropTypes.bool,
+    onClick: PropTypes.func,
+    modifier: PropTypes.string,
+    checked: PropTypes.bool,
+    meta: PropTypes.shape({
+        touched: PropTypes.bool,
+        error: PropTypes.object,
+    }).isRequired,
+};
 
 export const renderServiceField = ({
     input,
@@ -124,111 +202,46 @@ export const renderServiceField = ({
     modifier,
     icon,
     meta: { touched, error },
-}) => (
-    <Fragment>
-        <label className={`service custom-switch ${modifier}`}>
-            <input
-                {...input}
-                type="checkbox"
-                className="custom-switch-input"
-                value={placeholder.toLowerCase()}
-                disabled={disabled}
-            />
-            <span className="service__switch custom-switch-indicator"></span>
-            <span className="service__text">{placeholder}</span>
-            <svg className="service__icon">
-                <use xlinkHref={`#${icon}`} />
-            </svg>
-        </label>
-        {!disabled &&
-            touched &&
-            (error && <span className="form__message form__message--error">{error}</span>)}
-    </Fragment>
-);
+}) => <Fragment>
+    <label className={`service custom-switch ${modifier}`}>
+        <input
+            {...input}
+            type="checkbox"
+            className="custom-switch-input"
+            value={placeholder.toLowerCase()}
+            disabled={disabled}
+        />
+        <span className="service__switch custom-switch-indicator"></span>
+        <span className="service__text">{placeholder}</span>
+        <svg className="service__icon">
+            <use xlinkHref={`#${icon}`} />
+        </svg>
+    </label>
+    {!disabled && touched && error
+    && <span className="form__message form__message--error">{error}</span>}
+</Fragment>;
 
-// Validation functions
-export const required = (value) => {
-    if (value || value === 0) {
-        return false;
-    }
-    return <Trans>form_error_required</Trans>;
+renderServiceField.propTypes = {
+    input: PropTypes.object.isRequired,
+    placeholder: PropTypes.string,
+    disabled: PropTypes.bool,
+    modifier: PropTypes.string,
+    icon: PropTypes.string,
+    meta: PropTypes.shape({
+        touched: PropTypes.bool,
+        error: PropTypes.object,
+    }).isRequired,
 };
 
-export const ipv4 = (value) => {
-    if (value && !new RegExp(R_IPV4).test(value)) {
-        return <Trans>form_error_ip4_format</Trans>;
-    }
-    return false;
-};
+/**
+ * @param value {string}
+ * @returns {*|number}
+ */
+export const toNumber = (value) => value && parseInt(value, 10);
 
-export const ipv6 = (value) => {
-    if (value && !new RegExp(R_IPV6).test(value)) {
-        return <Trans>form_error_ip6_format</Trans>;
-    }
-    return false;
-};
-
-export const ip = (value) => {
-    if (value && !new RegExp(R_IPV4).test(value) && !new RegExp(R_IPV6).test(value)) {
-        return <Trans>form_error_ip_format</Trans>;
-    }
-    return false;
-};
-
-export const mac = (value) => {
-    if (value && !new RegExp(R_MAC).test(value)) {
-        return <Trans>form_error_mac_format</Trans>;
-    }
-    return false;
-};
-
-export const isPositive = (value) => {
-    if ((value || value === 0) && value <= 0) {
-        return <Trans>form_error_positive</Trans>;
-    }
-    return false;
-};
-
-export const port = (value) => {
-    if ((value || value === 0) && (value < 80 || value > 65535)) {
-        return <Trans>form_error_port_range</Trans>;
-    }
-    return false;
-};
-
-export const portTLS = (value) => {
-    if (value === 0) {
-        return false;
-    } else if (value && (value < 80 || value > 65535)) {
-        return <Trans>form_error_port_range</Trans>;
-    }
-    return false;
-};
-
-export const isSafePort = (value) => {
-    if (UNSAFE_PORTS.includes(value)) {
-        return <Trans>form_error_port_unsafe</Trans>;
-    }
-    return false;
-};
-
-export const domain = (value) => {
-    if (value && !new RegExp(R_HOST).test(value)) {
-        return <Trans>form_error_domain_format</Trans>;
-    }
-    return false;
-};
-
-export const answer = (value) => {
-    if (
-        value &&
-        (!new RegExp(R_IPV4).test(value) &&
-            !new RegExp(R_IPV6).test(value) &&
-            !new RegExp(R_HOST).test(value))
-    ) {
-        return <Trans>form_error_answer_format</Trans>;
-    }
-    return false;
-};
-
-export const toNumber = value => value && parseInt(value, 10);
+/**
+ * @param value {string}
+ * @returns {boolean}
+ */
+export const isValidAbsolutePath = (value) => R_WIN_ABSOLUTE_PATH.test(value)
+    || R_UNIX_ABSOLUTE_PATH.test(value);

@@ -1,7 +1,12 @@
 package home
 
 import (
+	"net"
+	"os"
 	"testing"
+	"time"
+
+	"github.com/AdguardTeam/AdGuardHome/dhcpd"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -13,11 +18,11 @@ func TestClients(t *testing.T) {
 	clients := clientsContainer{}
 	clients.testing = true
 
-	clients.Init(nil, nil)
+	clients.Init(nil, nil, nil)
 
 	// add
 	c = Client{
-		IDs:  []string{"1.1.1.1", "aa:aa:aa:aa:aa:aa"},
+		IDs:  []string{"1.1.1.1", "1:2:3::4", "aa:aa:aa:aa:aa:aa"},
 		Name: "client1",
 	}
 	b, e = clients.Add(c)
@@ -36,14 +41,13 @@ func TestClients(t *testing.T) {
 	}
 
 	c, b = clients.Find("1.1.1.1")
-	if !b || c.Name != "client1" {
-		t.Fatalf("Find #1")
-	}
+	assert.True(t, b && c.Name == "client1")
+
+	c, b = clients.Find("1:2:3::4")
+	assert.True(t, b && c.Name == "client1")
 
 	c, b = clients.Find("2.2.2.2")
-	if !b || c.Name != "client2" {
-		t.Fatalf("Find #2")
-	}
+	assert.True(t, b && c.Name == "client2")
 
 	// failed add - name in use
 	c = Client{
@@ -110,6 +114,7 @@ func TestClients(t *testing.T) {
 	c = Client{}
 	c, b = clients.Find("1.1.1.2")
 	assert.True(t, b && c.Name == "client1-renamed" && c.IDs[0] == "1.1.1.2" && c.UseOwnSettings)
+	assert.True(t, clients.list["client1"] == nil)
 
 	// failed remove - no such name
 	if clients.Del("client3") {
@@ -151,7 +156,7 @@ func TestClientsWhois(t *testing.T) {
 	var c Client
 	clients := clientsContainer{}
 	clients.testing = true
-	clients.Init(nil, nil)
+	clients.Init(nil, nil, nil)
 
 	whois := [][]string{{"orgname", "orgname-val"}, {"country", "country-val"}}
 	// set whois info on new client
@@ -163,13 +168,99 @@ func TestClientsWhois(t *testing.T) {
 	clients.SetWhoisInfo("1.1.1.1", whois)
 	assert.True(t, clients.ipHost["1.1.1.1"].WhoisInfo[0][1] == "orgname-val")
 
-	// set whois info on existing client
+	// Check that we cannot set whois info on a manually-added client
 	c = Client{
 		IDs:  []string{"1.1.1.2"},
 		Name: "client1",
 	}
 	_, _ = clients.Add(c)
 	clients.SetWhoisInfo("1.1.1.2", whois)
-	assert.True(t, clients.idIndex["1.1.1.2"].WhoisInfo[0][1] == "orgname-val")
+	assert.True(t, clients.ipHost["1.1.1.2"] == nil)
 	_ = clients.Del("client1")
+}
+
+func TestClientsAddExisting(t *testing.T) {
+	var c Client
+	clients := clientsContainer{}
+	clients.testing = true
+	clients.Init(nil, nil, nil)
+
+	// some test variables
+	mac, _ := net.ParseMAC("aa:aa:aa:aa:aa:aa")
+	testIP := "1.2.3.4"
+
+	// add a client
+	c = Client{
+		IDs:  []string{"1.1.1.1", "1:2:3::4", "aa:aa:aa:aa:aa:aa", "2.2.2.0/24"},
+		Name: "client1",
+	}
+	ok, err := clients.Add(c)
+	assert.True(t, ok)
+	assert.Nil(t, err)
+
+	// add an auto-client with the same IP - it's allowed
+	ok, err = clients.AddHost("1.1.1.1", "test", ClientSourceRDNS)
+	assert.True(t, ok)
+	assert.Nil(t, err)
+
+	// now some more complicated stuff
+	// first, init a DHCP server with a single static lease
+	config := dhcpd.ServerConfig{
+		DBFilePath: "leases.db",
+	}
+	defer func() { _ = os.Remove("leases.db") }()
+	clients.dhcpServer = dhcpd.Create(config)
+	err = clients.dhcpServer.AddStaticLease(dhcpd.Lease{
+		HWAddr:   mac,
+		IP:       net.ParseIP(testIP).To4(),
+		Hostname: "testhost",
+		Expiry:   time.Now().Add(time.Hour),
+	})
+	assert.Nil(t, err)
+
+	// add a new client with the same IP as for a client with MAC
+	c = Client{
+		IDs:  []string{testIP},
+		Name: "client2",
+	}
+	ok, err = clients.Add(c)
+	assert.True(t, ok)
+	assert.Nil(t, err)
+
+	// add a new client with the IP from the client1's IP range
+	c = Client{
+		IDs:  []string{"2.2.2.2"},
+		Name: "client3",
+	}
+	ok, err = clients.Add(c)
+	assert.True(t, ok)
+	assert.Nil(t, err)
+}
+
+func TestClientsCustomUpstream(t *testing.T) {
+	clients := clientsContainer{}
+	clients.testing = true
+
+	clients.Init(nil, nil, nil)
+
+	// add client with upstreams
+	client := Client{
+		IDs:  []string{"1.1.1.1", "1:2:3::4", "aa:aa:aa:aa:aa:aa"},
+		Name: "client1",
+		Upstreams: []string{
+			"1.1.1.1",
+			"[/example.org/]8.8.8.8",
+		},
+	}
+	ok, err := clients.Add(client)
+	assert.Nil(t, err)
+	assert.True(t, ok)
+
+	config := clients.FindUpstreams("1.2.3.4")
+	assert.Nil(t, config)
+
+	config = clients.FindUpstreams("1.1.1.1")
+	assert.NotNil(t, config)
+	assert.Equal(t, 1, len(config.Upstreams))
+	assert.Equal(t, 1, len(config.DomainReservedUpstreams))
 }

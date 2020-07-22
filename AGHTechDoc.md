@@ -29,6 +29,9 @@ Contents:
 	* Static IP check/set
 	* Add a static lease
 	* API: Reset DHCP configuration
+* DNS general settings
+	* API: Get DNS general settings
+	* API: Set DNS general settings
 * DNS access settings
 	* List access settings
 	* Set access settings
@@ -52,7 +55,11 @@ Contents:
 	* Filters update mechanism
 	* API: Get filtering parameters
 	* API: Set filtering parameters
+	* API: Refresh filters
+	* API: Add Filter
 	* API: Set URL parameters
+	* API: Delete URL
+	* API: Domain Check
 * Log-in page
 	* API: Log in
 	* API: Log out
@@ -62,7 +69,6 @@ Contents:
 ## Relations between subsystems
 
 ![](doc/agh-arch.png)
-
 
 
 ## First startup
@@ -134,9 +140,12 @@ Request:
 	{
 	"web":{"port":80,"ip":"192.168.11.33"},
 	"dns":{"port":53,"ip":"127.0.0.1","autofix":false},
+	"set_static_ip": true | false
 	}
 
 Server should check whether a port is available only in case it itself isn't already listening on that port.
+
+If `set_static_ip` is `true`, Server attempts to set a static IP for the network interface chosen by `dns.ip` setting.  If the operation is successful, `static_ip.static` setting will be `yes`.  If it fails, `static_ip.static` setting will be set to `error` and `static_ip.error` will contain the error message.
 
 Server replies on success:
 
@@ -145,7 +154,14 @@ Server replies on success:
 	{
 	"web":{"status":""},
 	"dns":{"status":""},
+	"static_ip": {
+		"static": "yes|no|error",
+		"ip": "<Current dynamic IP address>", // set if static=no
+		"error": "..." // set if static=error
 	}
+	}
+
+If `static_ip.static` is `no`, Server has detected that the system uses a dynamic address and it can  automatically set a static address if `set_static_ip` in request is `true`.  See section `Static IP check/set` for detailed process.
 
 Server replies on error:
 
@@ -168,7 +184,11 @@ Request:
 	POST /control/install/check_config
 
 	{
-	"dns":{"port":53,"ip":"127.0.0.1","autofix":false}
+	"dns":{
+		"port":53,
+		"ip":"127.0.0.1",
+		"autofix":false
+	}
 	}
 
 Check if DNSStubListener is enabled:
@@ -199,9 +219,21 @@ If user clicks on "Fix" button, UI sends request to perform an automatic fix
 	"dns":{"port":53,"ip":"127.0.0.1","autofix":true},
 	}
 
-Deactivate (save backup as `resolved.conf.orig`) and stop DNSStubListener:
+Deactivate DNSStubListener and update DNS server address.  Create a new file: `/etc/systemd/resolved.conf.d/adguardhome.conf` (create a `/etc/systemd/resolved.conf.d` directory if necessary):
 
-	sed -r -i.orig 's/#?DNSStubListener=yes/DNSStubListener=no/g' /etc/systemd/resolved.conf
+	[Resolve]
+	DNS=127.0.0.1
+	DNSStubListener=no
+
+Specifying "127.0.0.1" as DNS server address is necessry because otherwise the nameserver will be "127.0.0.53" which doesn't work without DNSStubListener.
+
+Activate another resolv.conf file:
+
+	mv /etc/resolv.conf /etc/resolv.conf.backup
+	ln -s /run/systemd/resolve/resolv.conf /etc/resolv.conf
+
+Stop DNSStubListener:
+
 	systemctl reload-or-restart systemd-resolved
 
 Server replies:
@@ -312,9 +344,13 @@ Response:
 
 If `can_autoupdate` is true, then the server can automatically upgrade to a new version.
 
-Response with empty body:
+Response when auto-update is disabled by command-line argument:
 
 	200 OK
+
+	{
+		"disabled":true
+	}
 
 It means that update check is disabled by user.  UI should do nothing.
 
@@ -483,13 +519,7 @@ which will print:
 	default via 192.168.0.1 proto dhcp metric 100
 
 
-#### Phase 2
-
-This method only works on Raspbian.
-
-On Ubuntu DHCP for a network interface can't be disabled via `dhcpcd.conf`.  This must be configured in `/etc/netplan/01-netcfg.yaml`.
-
-Fedora doesn't use `dhcpcd.conf` configuration at all.
+#### Phase 2 (Raspbian)
 
 Step 1.
 
@@ -508,6 +538,44 @@ Step 2.
 If we would set a different IP address, we'd need to replace the IP address for the current network configuration.  But currently this step isn't necessary.
 
 	ip addr replace dev eth0 192.168.0.1/24
+
+
+#### Phase 2 (Ubuntu)
+
+`/etc/netplan/01-netcfg.yaml` or `/etc/netplan/01-network-manager-all.yaml`
+
+This configuration example has a static IP set for `enp0s3` interface:
+
+	network:
+		version: 2
+		renderer: networkd
+		ethernets:
+			enp0s3:
+				dhcp4: no
+				addresses: [192.168.0.2/24]
+				gateway: 192.168.0.1
+				nameservers:
+					addresses: [192.168.0.1,8.8.8.8]
+
+For dynamic configuration `dhcp4: yes` is set.
+
+Make a backup copy to `/etc/netplan/01-netcfg.yaml.backup`.
+
+Apply:
+
+	netplan apply
+
+Restart network:
+
+	systemctl restart networking
+
+or:
+
+	systemctl restart network-manager
+
+or:
+
+	systemctl restart system-networkd
 
 
 ### Add a static lease
@@ -658,6 +726,7 @@ Response:
 		{
 			name: "client1"
 			ids: ["...", ...] // IP, CIDR or MAC
+			tags: ["...", ...]
 			use_global_settings: true
 			filtering_enabled: false
 			parental_enabled: false
@@ -683,6 +752,7 @@ Response:
 			}
 		}
 	]
+	supported_tags: ["...", ...]
 	}
 
 Supported keys for `whois_info`: orgname, country, city.
@@ -697,6 +767,7 @@ Request:
 	{
 		name: "client1"
 		ids: ["...", ...] // IP, CIDR or MAC
+		tags: ["...", ...]
 		use_global_settings: true
 		filtering_enabled: false
 		parental_enabled: false
@@ -727,6 +798,7 @@ Request:
 		data: {
 			name: "client1"
 			ids: ["...", ...] // IP, CIDR or MAC
+			tags: ["...", ...]
 			use_global_settings: true
 			filtering_enabled: false
 			parental_enabled: false
@@ -801,6 +873,74 @@ Response:
 	]
 
 
+## DNS general settings
+
+### API: Get DNS general settings
+
+Request:
+
+	GET /control/dns_info
+
+Response:
+
+	200 OK
+
+	{
+		"upstream_dns": ["tls://...", ...],
+		"bootstrap_dns": ["1.2.3.4", ...],
+
+		"protection_enabled": true | false,
+		"ratelimit": 1234,
+		"blocking_mode": "default" | "nxdomain" | "null_ip" | "custom_ip",
+		"blocking_ipv4": "1.2.3.4",
+		"blocking_ipv6": "1:2:3::4",
+		"edns_cs_enabled": true | false,
+		"dnssec_enabled": true | false
+		"disable_ipv6": true | false,
+		"upstream_mode": "" | "parallel" | "fastest_addr"
+		"cache_size": 1234, // in bytes
+		"cache_ttl_min": 1234, // in seconds
+		"cache_ttl_max": 1234, // in seconds
+	}
+
+
+### API: Set DNS general settings
+
+Request:
+
+	POST /control/dns_config
+
+	{
+		"upstream_dns": ["tls://...", ...],
+		"bootstrap_dns": ["1.2.3.4", ...],
+
+		"protection_enabled": true | false,
+		"ratelimit": 1234,
+		"blocking_mode": "default" | "nxdomain" | "null_ip" | "custom_ip",
+		"blocking_ipv4": "1.2.3.4",
+		"blocking_ipv6": "1:2:3::4",
+		"edns_cs_enabled": true | false,
+		"dnssec_enabled": true | false
+		"disable_ipv6": true | false,
+		"upstream_mode": "" | "parallel" | "fastest_addr"
+		"cache_size": 1234, // in bytes
+		"cache_ttl_min": 1234, // in seconds
+		"cache_ttl_max": 1234, // in seconds
+	}
+
+Response:
+
+	200 OK
+
+`blocking_mode`:
+* default: Respond with NXDOMAIN when blocked by Adblock-style rule;  respond with the IP address specified in the rule when blocked by /etc/hosts-style rule
+* NXDOMAIN: Respond with NXDOMAIN code
+* Null IP: Respond with zero IP address (0.0.0.0 for A; :: for AAAA)
+* Custom IP: Respond with a manually set IP address
+
+`blocking_ipv4` and `blocking_ipv6` values are active when `blocking_mode` is set to `custom_ip`.
+
+
 ## DNS access settings
 
 There are low-level settings that can block undesired DNS requests.  "Blocking" means not responding to request.
@@ -824,7 +964,7 @@ Response:
 	{
 		allowed_clients: ["127.0.0.1", ...]
 		disallowed_clients: ["127.0.0.1", ...]
-		blocked_hosts: ["host.com", ...]
+		blocked_hosts: ["host.com", ...] // host name or a wildcard
 	}
 
 
@@ -850,6 +990,110 @@ Response:
 This section allows the administrator to easily configure custom DNS response for a specific domain name.
 A, AAAA and CNAME records are supported.
 
+Syntax:
+
+	key -> value
+
+where `key` is a host name or a wild card that matches Question in DNS request
+and `value` is either:
+* IPv4 address: use this IP in A response
+* IPv6 address: use this IP in AAAA response
+* canonical name: add CNAME record
+* "<key>": CNAME exception - pass request to upstream
+* "A": A exception - pass A request to upstream
+* "AAAA": AAAA exception - pass AAAA request to upstream
+
+
+#### Example: A record
+
+	host.com -> 1.2.3.4
+
+Response:
+
+	A:
+		A = 1.2.3.4
+	AAAA:
+		<empty>
+
+#### Example: AAAA record
+
+	host.com -> ::1
+
+Response:
+
+	A:
+		<empty>
+	AAAA:
+		AAAA = ::1
+
+#### Example: CNAME record
+
+	sub.host.com -> host.com
+
+Response:
+
+	A:
+		CNAME = host.com
+		A = <IPv4 address of host.com>
+	AAAA:
+		CNAME = host.com
+		AAAA = <IPv6 address of host.com>
+
+#### Example: CNAME+A records
+
+	sub.host.com -> host.com
+	host.com -> 1.2.3.4
+
+Response:
+
+	A:
+		CNAME = host.com
+		A = 1.2.3.4
+	AAAA:
+		CNAME = host.com
+
+#### Example: Wildcard CNAME+A record with CNAME exception
+
+	*.host.com -> 1.2.3.4
+	pass.host.com -> pass.host.com
+
+Response to `my.host.com`:
+
+	A:
+		A = 1.2.3.4
+	AAAA:
+		<empty>
+
+Response to `pass.host.com`:
+
+	A:
+		A = <IPv4 address of pass.host.com>
+	AAAA:
+		AAAA = <IPv6 address of pass.host.com>
+
+#### Example: A record with AAAA exception
+
+	host.com -> 1.2.3.4
+	host.com -> AAAA
+
+Response:
+
+	A:
+		A = 1.2.3.4
+	AAAA:
+		AAAA = <IPv6 address of host.com>
+
+#### Example: pass A only
+
+	host.com -> A
+
+Response:
+
+	A:
+		A = <IPv4 address of host.com>
+	AAAA:
+		<empty>
+
 
 ### API: List rewrite entries
 
@@ -868,6 +1112,8 @@ Response:
 	}
 	...
 	]
+
+`domain` can be an exact host name (`www.host.com`) or a wildcard (`*.host.com`).
 
 
 ### API: Add a rewrite entry
@@ -1066,8 +1312,9 @@ When a new DNS request is received and processed, we store information about thi
 	"QH":"...", // target host name without the last dot
 	"QT":"...", // question type
 	"QC":"...", // question class
-	"Answer":"...",
-	"OrigAnswer":"...",
+	"CP":"" | "doh", // client connection protocol
+	"Answer":"base64 data",
+	"OrigAnswer":"base64 data",
 	"Result":{
 		"IsFiltered":true,
 		"Reason":3,
@@ -1100,16 +1347,28 @@ Request:
 
 	GET /control/querylog
 	?older_than=2006-01-02T15:04:05.999999999Z07:00
-	&filter_domain=...
-	&filter_client=...
-	&filter_question_type=A | AAAA
-	&filter_response_status= | filtered
+	&search=...
+	&response_status="..."
 
-`older_than` setting is used for paging.  UI uses an empty value for `older_than` on the first request and gets the latest log entries.  To get the older entries, UI sets `older_than` to the `oldest` value from the server's response.
+`older_than` setting is used for paging.  UI uses an empty value for `older_than` on the first request and gets the latest log entries. To get the older entries, UI sets `older_than` to the `oldest` value from the server's response.
 
-If "filter" settings are set, server returns only entries that match the specified request.
+If search settings are set, server returns only entries that match the specified request.
 
-For `filter.domain` and `filter.client` the server matches substrings by default: `adguard.com` matches `www.adguard.com`.  Strict matching can be enabled by enclosing the value in double quotes: `"adguard.com"` matches `adguard.com` but doesn't match `www.adguard.com`.
+`search`:
+match by domain name or client IP address.
+The server matches substrings by default: e.g. `adguard.com` matches `www.adguard.com`.
+Strict matching can be enabled by enclosing the value in double quotes: e.g. `"adguard.com"` matches `adguard.com` but doesn't match `www.adguard.com`.
+
+`response_status`:
+* all
+* filtered             - all kinds of filtering
+* blocked              - blocked or blocked service
+* blocked_safebrowsing - blocked by safebrowsing
+* blocked_parental     - blocked by parental control
+* whitelisted          - whitelisted
+* rewritten            - all kinds of rewrites
+* safe_search          - enforced safe search
+* processed            - not blocked, not white-listed entries
 
 Response:
 
@@ -1132,7 +1391,10 @@ Response:
 			}
 			...
 		],
+		"upstream":"...", // Upstream URL starting with tcp://, tls://, https://, or with an IP address
+		"answer_dnssec": true,
 		"client":"127.0.0.1",
+		"client_proto": "" (plain) | "doh" | "dot",
 		"elapsedMs":"0.098403",
 		"filterId":1,
 		"question":{
@@ -1152,6 +1414,8 @@ Response:
 
 The most recent entries are at the top of list.
 
+If there are no more older entries, `"oldest":""` is returned.
+
 
 ### API: Set querylog parameters
 
@@ -1162,11 +1426,21 @@ Request:
 	{
 		"enabled": true | false
 		"interval": 1 | 7 | 30 | 90
+		"anonymize_client_ip": true | false // anonymize clients' IP addresses
 	}
 
 Response:
 
 	200 OK
+
+`anonymize_client_ip`:
+1. New log entries written to a log file will contain modified client IP addresses.  Note that there's no way to obtain the full IP address later for these entries.
+2. `GET /control/querylog` response data will contain modified client IP addresses (masked /24 or /112).
+3. Searching by client IP won't work for the previously stored entries.
+
+How `anonymize_client_ip` affects Stats:
+1. After AGH restart, new stats entries will contain modified client IP addresses.
+2. Existing entries are not affected.
 
 
 ### API: Get querylog parameters
@@ -1182,6 +1456,7 @@ Response:
 	{
 		"enabled": true | false
 		"interval": 1 | 7 | 30 | 90
+		"anonymize_client_ip": true | false
 	}
 
 
@@ -1193,7 +1468,10 @@ This is how DNS requests and responses are filtered by AGH:
 
 * 'dnsproxy' module receives DNS request from client and passes control to AGH
 * AGH applies filtering logic to the host name in DNS Question:
-	* process Rewrite rules
+	* process Rewrite rules.
+		Can set CNAME and a list of IP addresses.
+	* process /etc/hosts entries.
+		Can set a list of IP addresses or a hostname (for PTR requests).
 	* match host name against filtering lists
 	* match host name against blocked services rules
 	* process SafeSearch rules
@@ -1242,8 +1520,22 @@ Response:
 			}
 			...
 		],
+		"whitelist_filters":[
+			{
+			"id":1
+			"enabled":true,
+			"url":"https://...",
+			"name":"...",
+			"rules_count":1234,
+			"last_updated":"2019-09-04T18:29:30+00:00",
+			}
+			...
+		],
 		"user_rules":["...", ...]
 	}
+
+For both arrays `filters` and `whitelist_filters` there are unique values: id, url.
+ID for each filter is assigned by Server - it's used for file names.
 
 
 ### API: Set filtering parameters
@@ -1262,15 +1554,35 @@ Response:
 	200 OK
 
 
-### API: Set URL parameters
+### API: Refresh filters
 
 Request:
 
-	POST /control/filtering/set_url
+	POST /control/filtering/refresh
 
 	{
-		"url": "..."
-		"enabled": true | false
+		"whitelist": true
+	}
+
+Response:
+
+	200 OK
+
+	{
+		"updated": 123 // number of filters updated
+	}
+
+
+### API: Add Filter
+
+Request:
+
+	POST /control/filtering/add_url
+
+	{
+		"name": "..."
+		"url": "..." // URL or an absolute file path
+		"whitelist": true
 	}
 
 Response:
@@ -1278,9 +1590,72 @@ Response:
 	200 OK
 
 
+### API: Set URL parameters
+
+Request:
+
+	POST /control/filtering/set_url
+
+	{
+	"url": "..."
+	"whitelist": true
+	"data": {
+		"name": "..."
+		"url": "..."
+		"enabled": true | false
+	}
+	}
+
+Response:
+
+	200 OK
+
+
+### API: Delete URL
+
+Request:
+
+	POST /control/filtering/remove_url
+
+	{
+	"url": "..."
+	"whitelist": true
+	}
+
+Response:
+
+	200 OK
+
+
+### API: Domain Check
+
+Check if host name is filtered.
+
+Request:
+
+	GET /control/filtering/check_host?name=hostname
+
+Response:
+
+	200 OK
+
+	{
+	"reason":"FilteredBlackList",
+	"filter_id":1,
+	"rule":"||doubleclick.net^",
+	"service_name": "...", // set if reason=FilteredBlockedService
+
+	// if reason=ReasonRewrite:
+	"cname": "...",
+	"ip_addrs": ["1.2.3.4", ...],
+	}
+
+
 ## Log-in page
 
-After user completes the steps of installation wizard, he must log in into dashboard using his name and password.  After user successfully logs in, he gets the Cookie which allows the server to authenticate him next time without password.  After the Cookie is expired, user needs to perform log-in operation again.  All requests without a proper Cookie get redirected to Log-In page with prompt for name and password.
+After user completes the steps of installation wizard, he must log in into dashboard using his name and password.  After user successfully logs in, he gets the Cookie which allows the server to authenticate him next time without password.  After the Cookie is expired, user needs to perform log-in operation again.
+
+Requests to / or /index.html without a proper Cookie get redirected to Log-In page with prompt for name and password.  The server responds with 403 to all other requests (including all API methods) without a proper Cookie.
 
 YAML configuration:
 
